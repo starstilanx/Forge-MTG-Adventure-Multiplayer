@@ -2,12 +2,15 @@ package forge.gamemodes.net;
 
 import forge.gamemodes.match.GameLobby.GameLobbyData;
 import forge.gamemodes.match.LobbySlotType;
+import forge.gamemodes.net.adventure.AdventureNetSession;
+import forge.gamemodes.net.client.ClientAdventureLobby;
 import forge.gamemodes.net.client.ClientGameLobby;
 import forge.gamemodes.net.client.FGameClient;
 import forge.gamemodes.net.event.IdentifiableNetEvent;
 import forge.gamemodes.net.event.MessageEvent;
 import forge.gamemodes.net.event.NetEvent;
 import forge.gamemodes.net.server.FServerManager;
+import forge.gamemodes.net.server.ServerAdventureLobby;
 import forge.gamemodes.net.server.ServerGameLobby;
 import forge.localinstance.properties.ForgeNetPreferences;
 import forge.gui.GuiBase;
@@ -52,6 +55,10 @@ public class NetConnectUtil {
     }
 
     public static ChatMessage host(final IOnlineLobby onlineLobby, final IOnlineChatInterface chatInterface) {
+        final AdventureNetSession session = AdventureNetSession.getInstance();
+        if (session.isMultiplayer && session.isHost) {
+            return hostAdventure(onlineLobby, chatInterface, session);
+        }
         final int port = FModel.getNetPreferences().getPrefInt(ForgeNetPreferences.FNetPref.NET_PORT);
         final FServerManager server = FServerManager.getInstance();
         final ServerGameLobby lobby = new ServerGameLobby();
@@ -162,6 +169,10 @@ public class NetConnectUtil {
     }
 
     public static ChatMessage join(final String url, final IOnlineLobby onlineLobby, final IOnlineChatInterface chatInterface) {
+        final AdventureNetSession session = AdventureNetSession.getInstance();
+        if (session.isMultiplayer && !session.isHost) {
+            return joinAdventure(url, onlineLobby, chatInterface, session);
+        }
         final IGuiGame gui = GuiBase.getInterface().getNewGuiGame();
         String hostname;
         int port;
@@ -250,5 +261,115 @@ public class NetConnectUtil {
         }
 
         return sb.toString();
+    }
+
+    // -------------------------------------------------------------------------
+    // Adventure multiplayer helpers
+    // -------------------------------------------------------------------------
+
+    private static ChatMessage hostAdventure(final IOnlineLobby onlineLobby,
+                                             final IOnlineChatInterface chatInterface,
+                                             final AdventureNetSession session) {
+        final int port = FModel.getNetPreferences().getPrefInt(ForgeNetPreferences.FNetPref.NET_PORT);
+        final FServerManager server = FServerManager.getInstance();
+        final ServerAdventureLobby lobby = new ServerAdventureLobby();
+        session.serverLobby = lobby;
+
+        NetworkLogConfig.activateNetworkLogging();
+        server.startServer(port);
+        server.setLobby(lobby);
+
+        final ILobbyView view = onlineLobby.setLobby(lobby);
+        lobby.setListener(new IUpdateable() {
+            @Override public void update(final boolean fullUpdate) {
+                view.update(fullUpdate);
+                server.updateLobbyState();
+            }
+            @Override public void update(final int slot, final LobbySlotType type) { }
+        });
+
+        view.setPlayerChangeListener((index, event) -> {
+            server.updateSlot(index, event);
+            server.updateLobbyState();
+        });
+
+        server.setLobbyListener(new ILobbyListener() {
+            @Override public void update(final forge.gamemodes.match.GameLobby.GameLobbyData state, final int slot) { }
+            @Override public void message(final String source, final String message, final ChatMessage.MessageType type) {
+                chatInterface.addMessage(new ChatMessage(source, message, type));
+            }
+            @Override public void close() { }
+            @Override public forge.gamemodes.net.client.ClientGameLobby getLobby() { return null; }
+        });
+
+        chatInterface.setGameClient(new IRemote() {
+            @Override public void send(final NetEvent event) {
+                if (event instanceof MessageEvent) server.broadcast(event);
+            }
+            @Override public Object sendAndWait(final IdentifiableNetEvent event) { send(event); return null; }
+        });
+
+        return new ChatMessage(null, Localizer.getInstance().getMessage("lblHostingPortOnN", String.valueOf(port)));
+    }
+
+    private static ChatMessage joinAdventure(final String url,
+                                             final IOnlineLobby onlineLobby,
+                                             final IOnlineChatInterface chatInterface,
+                                             final AdventureNetSession session) {
+        final URLValidator.HostPort hostPort = URLValidator.parseURL(url);
+        if (hostPort == null) {
+            return new ChatMessage(null, ForgeConstants.INVALID_HOST_COMMAND);
+        }
+        final String hostname = hostPort.host();
+        final int port = hostPort.port() == -1
+                ? Integer.parseInt(ForgeNetPreferences.FNetPref.NET_PORT.getDefault())
+                : hostPort.port();
+
+        final IGuiGame gui = GuiBase.getInterface().getNewGuiGame();
+        final ClientAdventureLobby lobby = new ClientAdventureLobby();
+        session.clientLobby = lobby;
+
+        final FGameClient client = new FGameClient(
+                FModel.getPreferences().getPref(FPref.PLAYER_NAME), "0", gui, hostname, port);
+        session.client = client;
+        onlineLobby.setClient(client);
+        chatInterface.setGameClient(client);
+
+        final ILobbyView view = onlineLobby.setLobby(lobby);
+        lobby.setListener(view);
+
+        final boolean[] readySent = { false };
+        client.addLobbyListener(new ILobbyListener() {
+            @Override public void message(final String source, final String message, final ChatMessage.MessageType type) {
+                chatInterface.addMessage(new ChatMessage(source, message, type));
+            }
+            @Override public void update(final forge.gamemodes.match.GameLobby.GameLobbyData state, final int slot) {
+                lobby.setLocalPlayer(slot);
+                lobby.setData(state);
+                // Signal readiness once the lobby data has loaded so the host's readiness
+                // gate can verify all clients are ready before starting the world.
+                if (!readySent[0]) {
+                    readySent[0] = true;
+                    try {
+                        client.send(forge.gamemodes.net.event.UpdateLobbyPlayerEvent.isReadyUpdate(true));
+                    } catch (final Exception ignored) { }
+                }
+            }
+            @Override public void close() {
+                forge.gui.GuiBase.setInterrupted(true);
+            }
+            @Override public forge.gamemodes.net.client.ClientGameLobby getLobby() { return lobby; }
+        });
+        view.setPlayerChangeListener((index, event) -> client.send(event));
+
+        NetworkLogConfig.activateNetworkLogging();
+        try {
+            client.connect();
+        } catch (final Exception ex) {
+            session.reset();
+            return new ChatMessage(null, ForgeConstants.CONN_ERROR_PREFIX + getConnectionErrorMessage(ex, hostname, port));
+        }
+
+        return new ChatMessage(null, Localizer.getInstance().getMessage("lblConnectedIPPort", hostname, String.valueOf(port)));
     }
 }

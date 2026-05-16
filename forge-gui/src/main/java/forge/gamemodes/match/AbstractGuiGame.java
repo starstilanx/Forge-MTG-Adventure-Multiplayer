@@ -92,6 +92,7 @@ public abstract class AbstractGuiGame implements IGuiGame, IMayViewCards {
         if (hasLocalPlayers() && !isLocalPlayer(player)) { //add check if gameControllers is not empty
             if(GuiBase.getInterface().isLibgdxPort()){//spectator is registered as localplayer bug on ai vs ai (after .
                 if (spectator != null){               //human vs ai game), then it loses "control" when you watch ai vs ai,
+                    System.out.println("[AdventureMP] setCurrentPlayer: spectator path clearing gameControllers, player=" + player + " class=" + this.getClass().getSimpleName());
                     currentPlayer = null;             //again, and vice versa, This is to prevent throwing error, lose control,
                     updateCurrentPlayer(null);        //workaround fix on mayviewcards below is needed or it will bug the UI..
                     gameControllers.clear();
@@ -99,9 +100,11 @@ public abstract class AbstractGuiGame implements IGuiGame, IMayViewCards {
                 }
             }
 
+            System.out.println("[AdventureMP] setCurrentPlayer: IllegalArgumentException for player=" + player + " class=" + this.getClass().getSimpleName() + " localPlayers=" + gameControllers.keySet());
             throw new IllegalArgumentException();
         }
 
+        System.out.println("[AdventureMP] setCurrentPlayer: setting player=" + player + " class=" + this.getClass().getSimpleName());
         currentPlayer = player;
         updateCurrentPlayer(player);
     }
@@ -474,7 +477,13 @@ public abstract class AbstractGuiGame implements IGuiGame, IMayViewCards {
         }
     }
 
+    /** Returns true if this GUI instance is a server-side proxy for a remote client. */
+    protected boolean isRemoteClientGui() { return false; }
+
     protected final void updatePromptForAwait(final PlayerView playerView) {
+        // Remote client GUIs must never overwrite the client's own prompt with a
+        // "Waiting for opponent" message — doing so disables the client's buttons.
+        if (isRemoteClientGui()) { return; }
         // Append "Waiting for opponent..." below the yield prompt so the user keeps the
         // cancel-yield UI during opponent turns instead of losing it to the await prompt.
         String waiting = Localizer.getInstance().getMessage("lblWaitingForOpponent");

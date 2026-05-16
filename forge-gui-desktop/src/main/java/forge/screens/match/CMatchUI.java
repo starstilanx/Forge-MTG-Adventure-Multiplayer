@@ -1179,6 +1179,8 @@ public final class CMatchUI
         vfxParticles.clear();
         vfxController = new forge.screens.match.vfx.VFXController(this, vfxParticles, vfxLayer);
         getGameView().getGame().subscribeToEvents(vfxController);
+
+        GeminiChatWindow.getInstance().reset();
     }
 
     /**

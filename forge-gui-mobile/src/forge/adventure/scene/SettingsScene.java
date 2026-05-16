@@ -283,6 +283,36 @@ public class SettingsScene extends UIScene {
                 Config.instance().saveSettings();
             }
         });
+        addSettingField("Use Gemini AI for Opponents", Config.instance().getSettingData().enableGeminiAi, new ChangeListener() {
+            @Override
+            public void changed(ChangeEvent event, Actor actor) {
+                Config.instance().getSettingData().enableGeminiAi = ((CheckBox) actor).isChecked();
+                Config.instance().saveSettings();
+            }
+        });
+        String[] geminiModels = {
+            "gemini-3.1-flash-lite",
+            "gemini-3.1-pro-preview",
+            "gemini-3-flash-preview",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.5-pro"
+        };
+        String savedGeminiModel = Config.instance().getSettingData().geminiModel;
+        if (savedGeminiModel == null || savedGeminiModel.isEmpty()) {
+            savedGeminiModel = geminiModels[0];
+        }
+        System.setProperty("forge.gemini.model", savedGeminiModel);
+        SelectBox<String> geminiModelBox = Controls.newComboBox(geminiModels, savedGeminiModel, o -> {
+            String model = (String) o;
+            if (model == null || model.isEmpty()) model = geminiModels[0];
+            Config.instance().getSettingData().geminiModel = model;
+            Config.instance().saveSettings();
+            System.setProperty("forge.gemini.model", model);
+            return null;
+        });
+        addLabel("Gemini Model");
+        settingGroup.add(geminiModelBox).align(Align.right).pad(2);
         CheckBox cbAnte = addCheckBox(Forge.getLocalizer().getMessage("cbAnte"), ForgePreferences.FPref.UI_ANTE);
         CheckBox cbAnteMatchRarity = addCheckBox(Forge.getLocalizer().getMessage("cbAnteMatchRarity"), ForgePreferences.FPref.UI_ANTE_MATCH_RARITY);
         CheckBox cbAnteIncludeBasicLands = addCheckBox(Forge.getLocalizer().getMessage("cbAnteIncludeBasicLands"), ForgePreferences.FPref.UI_ANTE_INCLUDE_BASIC_LANDS);

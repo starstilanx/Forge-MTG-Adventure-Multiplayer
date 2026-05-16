@@ -83,7 +83,7 @@ public final class VFXRenderer {
 
     // ---- construction ----
 
-    VFXRenderer(final ParticleSystem particles, final int initialWidth, final int initialHeight) {
+    public VFXRenderer(final ParticleSystem particles, final int initialWidth, final int initialHeight) {
         this.particles = particles;
         this.width  = Math.max(1, initialWidth);
         this.height = Math.max(1, initialHeight);
@@ -91,11 +91,11 @@ public final class VFXRenderer {
 
     // ---- public API (called from EDT or VFXController) ----
 
-    void setLayer(final VFXLayer layer) {
+    public void setLayer(final VFXLayer layer) {
         layerRef.set(layer);
     }
 
-    void resize(final int w, final int h) {
+    public void resize(final int w, final int h) {
         final int nw = Math.max(1, w);
         final int nh = Math.max(1, h);
         if (nw != width || nh != height) {
@@ -105,7 +105,7 @@ public final class VFXRenderer {
         }
     }
 
-    void start() {
+    public void start() {
         if (!running.compareAndSet(false, true)) { return; }
         glThread = new Thread(this::renderLoop, "VFX-GL");
         glThread.setDaemon(true);

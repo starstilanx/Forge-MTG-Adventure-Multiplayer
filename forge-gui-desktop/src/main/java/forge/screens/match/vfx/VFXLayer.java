@@ -3,18 +3,22 @@ package forge.screens.match.vfx;
 import javax.swing.JPanel;
 import javax.swing.SwingUtilities;
 import java.awt.AlphaComposite;
+import java.awt.BasicStroke;
 import java.awt.Color;
 import java.awt.Composite;
 import java.awt.Font;
 import java.awt.FontMetrics;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
+import java.awt.Rectangle;
 import java.awt.RenderingHints;
+import java.awt.Stroke;
 import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.function.Supplier;
 
 /**
  * Transparent Swing panel rendered on top of the match field.
@@ -51,6 +55,29 @@ public final class VFXLayer extends JPanel {
     private final ConcurrentLinkedQueue<FloatingLabel> incoming = new ConcurrentLinkedQueue<>();
     private final List<FloatingLabel>                  labels   = new ArrayList<>();
 
+    // ---- card overlay glows ----
+
+    public enum OverlayType { DAMAGE_FLASH, ENTER_GLOW, ATTACK_GLOW, BLOCK_GLOW }
+
+    private static final class CardOverlay {
+        final OverlayType        type;
+        final Supplier<Rectangle> bounds; // screen→layer coords, polled each frame
+        final Color               color;
+        final float               life;   // total seconds
+        float age;
+
+        CardOverlay(final OverlayType type, final Supplier<Rectangle> bounds,
+                    final Color color, final float life) {
+            this.type   = type;
+            this.bounds = bounds;
+            this.color  = color;
+            this.life   = life;
+        }
+    }
+
+    private final ConcurrentLinkedQueue<CardOverlay> incomingOverlays = new ConcurrentLinkedQueue<>();
+    private final List<CardOverlay>                  overlays         = new ArrayList<>();
+
     private volatile VFXRenderer renderer;
     private long lastLabelUpdate = System.nanoTime();
 
@@ -63,13 +90,23 @@ public final class VFXLayer extends JPanel {
 
     // ---- public API ----
 
-    void setRenderer(final VFXRenderer r) {
+    public void setRenderer(final VFXRenderer r) {
         this.renderer = r;
     }
 
     /** Any thread: queue a floating damage/life number at screen coordinates. */
     void addFloatingLabel(final String text, final Color color, final float x, final float y) {
         incoming.offer(new FloatingLabel(text, color, x, y));
+    }
+
+    /**
+     * Any thread: add a card overlay glow/flash.
+     * @param bounds  Supplier polled on the EDT each paint frame to get layer-relative bounds.
+     */
+    public void addCardOverlay(final OverlayType type, final Supplier<Rectangle> bounds,
+                               final Color color, final float lifeSecs) {
+        incomingOverlays.offer(new CardOverlay(type, bounds, color, lifeSecs));
+        SwingUtilities.invokeLater(this::repaint);
     }
 
     /** Called by the GL thread when a new particle frame is ready. */
@@ -105,17 +142,98 @@ public final class VFXLayer extends JPanel {
             }
         }
 
-        // update and draw floating labels
-        advanceLabels(g2);
-    }
-
-    // ---- private helpers ----
-
-    private void advanceLabels(final Graphics2D g2) {
+        // compute dt once for both advance passes
         final long now = System.nanoTime();
         final float dt = Math.min((now - lastLabelUpdate) / 1_000_000_000f, 0.1f);
         lastLabelUpdate = now;
 
+        // update and draw card overlays
+        advanceOverlays(g2, dt);
+
+        // update and draw floating labels
+        advanceLabels(g2, dt);
+    }
+
+    // ---- private helpers ----
+
+    private void advanceOverlays(final Graphics2D g2, final float dt) {
+        CardOverlay co;
+        while ((co = incomingOverlays.poll()) != null) {
+            overlays.add(co);
+        }
+        if (overlays.isEmpty()) { return; }
+
+        final Composite origComp = g2.getComposite();
+        final Stroke    origStroke = g2.getStroke();
+
+        final Iterator<CardOverlay> it = overlays.iterator();
+        while (it.hasNext()) {
+            co = it.next();
+            co.age += dt;
+            if (co.age >= co.life) { it.remove(); continue; }
+
+            final Rectangle r = co.bounds.get();
+            if (r == null || r.width <= 0 || r.height <= 0) { continue; }
+
+            final float t = co.age / co.life;
+            final float alpha = computeOverlayAlpha(co.type, t);
+            if (alpha <= 0f) { continue; }
+
+            final int arc = Math.max(6, r.width / 10);
+
+            g2.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER,
+                    Math.max(0f, Math.min(1f, alpha))));
+
+            switch (co.type) {
+                case DAMAGE_FLASH: {
+                    // solid fill with the glow color
+                    g2.setColor(co.color);
+                    g2.fillRoundRect(r.x, r.y, r.width, r.height, arc, arc);
+                    break;
+                }
+                case ENTER_GLOW:
+                case ATTACK_GLOW:
+                case BLOCK_GLOW: {
+                    // layered border glow: draw three concentric borders shrinking inward
+                    g2.setStroke(new BasicStroke(5f));
+                    g2.setColor(co.color.darker());
+                    g2.drawRoundRect(r.x - 3, r.y - 3, r.width + 6, r.height + 6, arc + 4, arc + 4);
+                    g2.setStroke(new BasicStroke(3f));
+                    g2.setColor(co.color);
+                    g2.drawRoundRect(r.x, r.y, r.width, r.height, arc, arc);
+                    g2.setStroke(new BasicStroke(1.5f));
+                    g2.setColor(co.color.brighter());
+                    g2.drawRoundRect(r.x + 2, r.y + 2, r.width - 4, r.height - 4, arc - 2, arc - 2);
+                    break;
+                }
+                default: break;
+            }
+        }
+
+        g2.setComposite(origComp);
+        g2.setStroke(origStroke);
+    }
+
+    private static float computeOverlayAlpha(final OverlayType type, final float t) {
+        switch (type) {
+            case DAMAGE_FLASH:
+                // flash in fast, decay
+                return t < 0.15f ? t / 0.15f * 0.7f : 0.7f * (1f - (t - 0.15f) / 0.85f);
+            case ENTER_GLOW:
+                // pulse: 0→peak→0
+                return (float) Math.sin(t * Math.PI) * 0.85f;
+            case ATTACK_GLOW:
+                // hold bright, then fade
+                return t < 0.6f ? 0.9f : 0.9f * (1f - (t - 0.6f) / 0.4f);
+            case BLOCK_GLOW:
+                // quick flash in, slow fade
+                return t < 0.2f ? t / 0.2f * 0.8f : 0.8f * (1f - (t - 0.2f) / 0.8f);
+            default:
+                return 0f;
+        }
+    }
+
+    private void advanceLabels(final Graphics2D g2, final float dt) {
         // drain incoming
         FloatingLabel fl;
         while ((fl = incoming.poll()) != null) {

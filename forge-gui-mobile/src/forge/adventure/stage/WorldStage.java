@@ -18,6 +18,8 @@ import forge.adventure.scene.TileMapScene;
 import forge.adventure.util.*;
 import forge.adventure.world.World;
 import forge.adventure.world.WorldSave;
+import forge.gamemodes.net.adventure.AdventureNetEvent;
+import forge.gamemodes.net.adventure.AdventureNetSession;
 import forge.gui.FThreads;
 import forge.haptic.HapticEngine;
 import forge.localinstance.properties.ForgePreferences.FPref;
@@ -233,6 +235,11 @@ public class WorldStage extends GameStage implements SaveFileContent {
             TileMapScene.instance().load(poi);
             stop();
             TileMapScene.instance().setFromWorldMap(true);
+            final forge.gamemodes.net.adventure.AdventureNetSession netSession =
+                    forge.gamemodes.net.adventure.AdventureNetSession.getInstance();
+            if (netSession.isActiveHost()) {
+                netSession.serverLobby.broadcastPoiEntry(poi.getID());
+            }
             Forge.switchScene(TileMapScene.instance());
         } catch (Exception e) {
             System.err.println("Error loading map...");
@@ -409,7 +416,44 @@ public class WorldStage extends GameStage implements SaveFileContent {
         setBounds(WorldSave.getCurrentSave().getWorld().getWidthInPixels(), WorldSave.getCurrentSave().getWorld().getHeightInPixels());
         GridPoint2 pos = background.translateFromWorldToChunk(player.getX(), player.getY());
         background.loadChunk(pos.x, pos.y);
+
+        // Seed allPositions with the actual player position BEFORE super.enter() creates remote
+        // sprites.  Without this, allPositions[0] is 0,0 and client sprites spawn off-screen.
+        final AdventureNetSession netSession = AdventureNetSession.getInstance();
+        if (netSession.isActiveHost()) {
+            netSession.serverLobby.updateHostPosition(player.getX(), player.getY());
+        }
+
         super.enter();
+
+        // Publish a fresh world snapshot so connecting clients get current state.
+        if (netSession.isActiveHost()) {
+            netSession.serverLobby.setWorldSnapshot(new AdventureNetEvent(
+                    AdventureNetEvent.Type.MAP_SYNC,
+                    forge.adventure.scene.LobbyScene.buildSyncPayload()));
+
+            // Announce the host player to all connected clients so they render a remote sprite for the host.
+            final forge.adventure.player.AdventurePlayer hostPlayer = WorldSave.getCurrentSave().getPlayer();
+            netSession.serverLobby.broadcastHostJoin(
+                    hostPlayer.getName(), hostPlayer.getWorldPosX(), hostPlayer.getWorldPosY());
+            // Broadcast host sprite/HP so clients can render the correct art immediately.
+            netSession.serverLobby.broadcastHostState(hostPlayer.spriteName(),
+                    String.valueOf(hostPlayer.getLife()));
+        } else if (netSession.isActiveClient() && netSession.client != null) {
+            // Send our player state (sprite, HP, deck) to the host so it can render us correctly
+            // and use our deck + HP when setting up battles.
+            final forge.adventure.player.AdventurePlayer p = WorldSave.getCurrentSave().getPlayer();
+            final forge.deck.Deck deck = p.getSelectedDeck();
+            final String deckStr = deck != null ? deck.getMain().toCardList("\n") : "";
+            try {
+                netSession.client.send(new AdventureNetEvent(
+                        AdventureNetEvent.Type.PLAYER_STATE,
+                        new String[]{ p.getName(), p.spriteName(),
+                                String.valueOf(p.getLife()), deckStr }));
+            } catch (final Exception e) {
+                System.err.println("[AdventureMP] Failed to send PLAYER_STATE: " + e.getMessage());
+            }
+        }
     }
 
     @Override

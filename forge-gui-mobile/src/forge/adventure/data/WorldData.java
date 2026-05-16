@@ -31,6 +31,13 @@ public class WorldData implements Serializable {
     public float maxRoadDistance;
     public String[] biomesNames;
 
+    public boolean continentMode          = false;
+    public float   continentNoiseZoom     = 3.0f;
+    public float   continentRadialWeight  = 0.6f;
+    public float   continentLandThreshold = 0.42f;
+    public float   biomeCenterMargin      = 0.08f;
+    public int     biomePlacementRetries  = 200;
+
 
     private BiomeSprites sprites;
     private List<BiomeData> biomes;

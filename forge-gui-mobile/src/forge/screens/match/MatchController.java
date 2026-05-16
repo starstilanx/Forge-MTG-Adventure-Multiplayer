@@ -6,7 +6,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import com.badlogic.gdx.Gdx;
 import forge.adventure.scene.DuelScene;
+import forge.sound.MusicPlaylist;
+import forge.sound.SoundSystem;
 import forge.adventure.util.Config;
 import forge.ai.GameState;
 import forge.deck.Deck;
@@ -210,6 +213,12 @@ public class MatchController extends NetworkGuiGame {
         //reset daytime every match
         updateDayTime(null);
         Forge.openScreen(view);
+        if (GuiBase.isNetPlay(this) && !(Forge.getCurrentScene() instanceof DuelScene)) {
+            // Client entered battle via network — HudScene.enter() owns Gdx.input.
+            // Reset it to MainInputProcessor so touches route to the match screen.
+            SoundSystem.instance.setBackgroundMusic(MusicPlaylist.MATCH);
+            Gdx.input.setInputProcessor(Forge.getInputProcessor());
+        }
     }
 
     @Override
@@ -399,6 +408,7 @@ public class MatchController extends NetworkGuiGame {
         PlayerZoneUpdates updates = new PlayerZoneUpdates();
         if (zones.size() == 1) {
             final ZoneType zoneType = zones.iterator().next();
+            System.out.println("[AdventureMP] openZones zone=" + zoneType + " players=" + playersWithTargetables.keySet().size() + " controller=" + (controller != null ? controller.getName() : "null"));
             switch (zoneType) {
                 case Battlefield:
                 case Command:
@@ -409,6 +419,8 @@ public class MatchController extends NetworkGuiGame {
                     boolean result = true;
                     for (final PlayerView player : playersWithTargetables.keySet()) {
                         final VPlayerPanel playerPanel = view.getPlayerPanel(player);
+                        System.out.println("[AdventureMP] openZones player=" + player.getName() + " panel=" + (playerPanel != null ? "found" : "NULL") + " handCards=" + (player.getCards(ZoneType.Hand) != null ? player.getCards(ZoneType.Hand).size() : "null-zone"));
+                        if (playerPanel == null) continue;
                         if (backupLastZones)
                             lastZonesToRestore.put(player, playerPanel.getSelectedTab());
                         playersWithTargetables.put(player, playerPanel.getSelectedTab()); //backup selected tab before changing it
@@ -520,6 +532,8 @@ public class MatchController extends NetworkGuiGame {
         // update zones on tabletop and floating zones - non-selectable cards may be rendered differently
         FThreads.invokeInEdtNowOrLater(() -> {
             for (final PlayerView p : getGameView().getPlayers()) {
+                int handSize = p.getCards(ZoneType.Hand) != null ? p.getCards(ZoneType.Hand).size() : -1;
+                System.out.println("[AdventureMP] setSelectables player=" + p.getName() + " handCards=" + handSize + " isLocal=" + isLocalPlayer(p));
                 if ( p.getCards(ZoneType.Battlefield) != null ) {
                     updateCards(isNetGame() ? p.getCards(ZoneType.Battlefield).threadSafeIterable() : p.getCards(ZoneType.Battlefield));
                 }

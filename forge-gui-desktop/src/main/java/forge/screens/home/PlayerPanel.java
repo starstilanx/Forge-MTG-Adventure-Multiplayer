@@ -545,6 +545,7 @@ public class PlayerPanel extends FPanel {
         for (final String profile : aiProfiles) {
             aiPickerComboBox.addItem(profile);
         }
+        aiPickerComboBox.addItem("Gemini");
         aiPickerComboBox.setSelectedItem(FPref.UI_CURRENT_AI_PROFILE.getDefault());
         aiPickerComboBox.setEnabled(true);
     }

@@ -29,6 +29,7 @@ import forge.adventure.player.AdventurePlayer;
 import forge.adventure.pointofintrest.PointOfInterestChanges;
 import forge.adventure.scene.*;
 import forge.adventure.util.*;
+import forge.gamemodes.net.adventure.AdventureNetSession;
 import forge.adventure.util.pathfinding.NavigationMap;
 import forge.adventure.util.pathfinding.NavigationVertex;
 import forge.adventure.util.pathfinding.ProgressableGraphPath;
@@ -73,6 +74,7 @@ public class MapStage extends GameStage {
     public InputEvent eventTouchDown, eventTouchUp;
     private boolean respawnEnemies;
     private boolean canFailDungeon = false;
+
     protected ArrayList<EnemySprite> enemies = new ArrayList<>();
     public Map<Integer, Vector2> waypoints = new HashMap<>();
 
@@ -354,10 +356,10 @@ public class MapStage extends GameStage {
 
     private boolean canSpawn(MapProperties prop) {
         DifficultyData difficultyData = Current.player().getDifficulty();
-        boolean spawnEasy = prop.get("spawn.Easy", Boolean.class);
-        boolean spawnNorm = prop.get("spawn.Normal", Boolean.class);
-        boolean spawnHard = prop.get("spawn.Hard", Boolean.class);
-        boolean spawnInsane = prop.get("spawn.Insane", Boolean.class);
+        boolean spawnEasy = !Boolean.FALSE.equals(prop.get("spawn.Easy", Boolean.class));
+        boolean spawnNorm = !Boolean.FALSE.equals(prop.get("spawn.Normal", Boolean.class));
+        boolean spawnHard = !Boolean.FALSE.equals(prop.get("spawn.Hard", Boolean.class));
+        boolean spawnInsane = !Boolean.FALSE.equals(prop.get("spawn.Insane", Boolean.class));
         if (difficultyData.spawnRank == 3 && !spawnInsane) return false;
         if (difficultyData.spawnRank == 2 && !spawnHard) return false;
         if (difficultyData.spawnRank == 1 && !spawnNorm) return false;
@@ -774,6 +776,11 @@ public class MapStage extends GameStage {
             WorldStage.getInstance().resetPlayerLocation();
         else if (defeatedByBoss)
             WorldStage.getInstance().defeatedFromBoss();
+        final forge.gamemodes.net.adventure.AdventureNetSession netSession =
+                forge.gamemodes.net.adventure.AdventureNetSession.getInstance();
+        if (netSession.isActiveHost()) {
+            netSession.serverLobby.broadcastPoiExit();
+        }
         Forge.switchScene(GameScene.instance());
         isPlayerLeavingDungeon = false;
         dialogOnlyInput = false;
@@ -1084,6 +1091,7 @@ public class MapStage extends GameStage {
                 }
             }
         }
+
     }
 
     private void showRewardScene(Array<Reward> rewards) {
@@ -1097,6 +1105,12 @@ public class MapStage extends GameStage {
     
     public void beginDuel(EnemySprite mob) {
         if (mob == null) return;
+        // In multiplayer host mode, notify all clients before starting the duel locally.
+        final AdventureNetSession netSession = AdventureNetSession.getInstance();
+        if (netSession.isActiveHost()) {
+            netSession.serverLobby.initiateBattle(
+                    mob.getData(), collectPlayerPositions());
+        }
         mob.clearCollisionHeight();
         currentMob = mob;
         player.setAnimation(CharacterSprite.AnimationTypes.Attack);
@@ -1168,6 +1182,10 @@ public class MapStage extends GameStage {
         }
         stop();
     }
+
+    // -------------------------------------------------------------------------
+    // Multiplayer API — all remote-player management is inherited from GameStage.
+    // -------------------------------------------------------------------------
 
     public void setQuestFlag(String key, int value) {
         changes.getMapFlags().put(key, (byte) value);
