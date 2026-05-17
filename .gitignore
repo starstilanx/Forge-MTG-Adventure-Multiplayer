@@ -31,6 +31,9 @@ nbactions.xml
 # Ignore binaries, temp files and test output, everywhere
 
 target
+
+# Ignore bundled Maven installation
+apache-maven-*/
 test-output
 bin
 gen
