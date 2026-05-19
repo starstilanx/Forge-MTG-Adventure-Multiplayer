@@ -64,6 +64,10 @@ public class PlayerControllerAi extends PlayerController {
         brains = new AiController(p, game);
     }
 
+    protected AiController getAiController() {
+        return brains;
+    }
+
     public boolean pilotsNonAggroDeck() {
         return pilotsNonAggroDeck;
     }

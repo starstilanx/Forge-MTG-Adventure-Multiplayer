@@ -3,7 +3,7 @@ package forge.gamemodes.net.client;
 import forge.gamemodes.match.GameLobby;
 import forge.gui.interfaces.IGuiGame;
 
-public final class ClientGameLobby extends GameLobby {
+public class ClientGameLobby extends GameLobby {
     private int localPlayer = -1;
 
     public ClientGameLobby() {
@@ -12,6 +12,9 @@ public final class ClientGameLobby extends GameLobby {
 
     public void setLocalPlayer(final int index) {
         this.localPlayer = index;
+    }
+    public int getLocalPlayer() {
+        return localPlayer;
     }
 
     @Override public boolean hasControl() {

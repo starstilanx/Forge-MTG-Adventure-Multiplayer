@@ -49,10 +49,15 @@ public class World implements Disposable, SaveFileContent {
     private final Random random = new Random();
     private boolean worldDataLoaded = false;
     private Texture globalTexture = null;
+    private float generatedPlayerStartX = 0.5f;
+    private float generatedPlayerStartY = 0.5f;
 
     public Random getRandom() {
         return random;
     }
+
+    public float getGeneratedPlayerStartX() { return generatedPlayerStartX; }
+    public float getGeneratedPlayerStartY() { return generatedPlayerStartY; }
 
     static public int highestBiome(long biome) {
         return (int) (Math.log(Long.highestOneBit(biome)) / Math.log(2));
@@ -134,6 +139,9 @@ public class World implements Disposable, SaveFileContent {
         return data;
     }
 
+    public long getSeed() {
+        return seed;
+    }
 
     public BiomeSpriteData getObject(int id) {
         return mapObjectIds.get(id);
@@ -321,6 +329,81 @@ public class World implements Disposable, SaveFileContent {
                 }
             }
 
+            // --- CONTINENT MASK ---
+            boolean[][] landMask = null;
+            if (data.continentMode) {
+                landMask = new boolean[width][height];
+                OpenSimplexNoise continentNoise = new OpenSimplexNoise(seed ^ 0xDEADBEEFL);
+                float cx = width / 2f, cy = height / 2f;
+                float maxDist = Math.min(cx, cy);
+                for (int x = 0; x < width; x++) {
+                    for (int y = 0; y < height; y++) {
+                        float n = ((float) continentNoise.eval(
+                            x / (float) width  * data.continentNoiseZoom,
+                            y / (float) height * data.continentNoiseZoom
+                        ) + 1f) / 2f;
+                        float dx = (x - cx) / maxDist, dy = (y - cy) / maxDist;
+                        float radial = (float) Math.sqrt(dx * dx + dy * dy);
+                        landMask[x][y] = n - data.continentRadialWeight * radial > data.continentLandThreshold;
+                    }
+                }
+            }
+
+            // --- BIOME CENTER OVERRIDES + PLAYER START ---
+            float[] overrideCenterX = null, overrideCenterY = null;
+            if (data.continentMode) {
+                List<BiomeData> biomes = data.GetBiomes();
+                overrideCenterX = new float[biomes.size()];
+                overrideCenterY = new float[biomes.size()];
+                List<float[]> placed = new ArrayList<>();
+
+                int idx = 0;
+                for (BiomeData biome : biomes) {
+                    if (biome.width == 1.0f && biome.height == 1.0f) {
+                        overrideCenterX[idx] = biome.startPointX;
+                        overrideCenterY[idx] = biome.startPointY;
+                        idx++; continue;
+                    }
+                    int halfW = (int)(biome.width * width / 2);
+                    int halfH = (int)(biome.height * height / 2);
+                    float minSep = data.biomeCenterMargin * Math.min(width, height);
+                    float chosenX = biome.startPointX, chosenY = biome.startPointY;
+                    boolean found = false;
+                    for (int attempt = 0; attempt < data.biomePlacementRetries && !found; attempt++) {
+                        int tx = halfW + random.nextInt(Math.max(1, width  - halfW * 2));
+                        int ty = halfH + random.nextInt(Math.max(1, height - halfH * 2));
+                        if (landMask == null || !landMask[tx][ty]) continue;
+                        boolean tooClose = false;
+                        for (float[] p : placed) {
+                            float ddx = tx - p[0] * width, ddy = ty - p[1] * height;
+                            if (Math.sqrt(ddx * ddx + ddy * ddy) < minSep) { tooClose = true; break; }
+                        }
+                        if (!tooClose) { chosenX = tx / (float) width; chosenY = ty / (float) height; found = true; }
+                    }
+                    if (!found) System.err.println("[ContinentMode] Fallback center for biome: " + biome.name);
+                    overrideCenterX[idx] = chosenX;
+                    overrideCenterY[idx] = chosenY;
+                    placed.add(new float[]{chosenX, chosenY});
+                    idx++;
+                }
+
+                // Find nearest land tile to map center for player spawn
+                int sx = width / 2, sy = height / 2;
+                outer:
+                for (int r = 0; r < Math.max(width, height) / 2; r++) {
+                    for (int ddx = -r; ddx <= r; ddx++) {
+                        for (int ddy = -r; ddy <= r; ddy++) {
+                            if (Math.abs(ddx) != r && Math.abs(ddy) != r) continue;
+                            int tx = sx + ddx, ty = sy + ddy;
+                            if (tx < 0 || ty < 0 || tx >= width || ty >= height) continue;
+                            if (landMask != null && landMask[tx][ty]) { sx = tx; sy = ty; break outer; }
+                        }
+                    }
+                }
+                generatedPlayerStartX = sx / (float) width;
+                generatedPlayerStartY = sy / (float) height;
+            }
+
             final int[] biomeIndex = {-1};
             currentTime[0] = measureGenerationTime("loading data", currentTime[0]);
             Map<BiomeStructureData, BiomeStructure> structureDataMap = new ConcurrentHashMap<>();
@@ -358,8 +441,10 @@ public class World implements Disposable, SaveFileContent {
             for (BiomeData biome : data.GetBiomes()) {
 
                 biomeIndex[0]++;
-                int biomeXStart = (int) Math.round(biome.startPointX * (double) width);
-                int biomeYStart = (int) Math.round(biome.startPointY * (double) height);
+                float effCX = overrideCenterX != null ? overrideCenterX[biomeIndex[0]] : biome.startPointX;
+                float effCY = overrideCenterY != null ? overrideCenterY[biomeIndex[0]] : biome.startPointY;
+                int biomeXStart = (int) Math.round(effCX * (double) width);
+                int biomeYStart = (int) Math.round(effCY * (double) height);
                 int biomeWidth = (int) Math.round(biome.width * (double) width);
                 int biomeHeight = (int) Math.round(biome.height * (double) height);
 
@@ -382,6 +467,7 @@ public class World implements Disposable, SaveFileContent {
                         float distanceValue = ((float) Math.sqrt((x - biomeXStart) * (x - biomeXStart) + (y - biomeYStart) * (y - biomeYStart))) / (Math.max(biomeWidth, biomeHeight) / 2f);
                         distanceValue *= biome.distWeight;
                         if (noiseValue + distanceValue < 1.0 || biome.invertHeight && (1 - noiseValue) + distanceValue < 1.0) {
+                            if (landMask != null && !landMask[x][y] && !biome.collision) continue;
                             Color color = biome.GetColor();
                             float[] hsv = new float[3];
                             color.toHsv(hsv);
@@ -448,7 +534,9 @@ public class World implements Disposable, SaveFileContent {
             if (!texture.isPrepared())
                 texture.prepare();
             Pixmap mapMarkerPixmap = texture.consumePixmap();
-            clearTerrain((int) (data.width * data.playerStartPosX), (int) (data.height * data.playerStartPosY), 10);
+            float psX = data.continentMode ? generatedPlayerStartX : data.playerStartPosX;
+            float psY = data.continentMode ? generatedPlayerStartY : data.playerStartPosY;
+            clearTerrain((int) (data.width * psX), (int) (data.height * psY), 10);
             //otherPoints.add(new Rectangle(((float) data.width * data.playerStartPosX * (float) data.tileSize) - data.tileSize * 3, ((float) data.height * data.playerStartPosY * data.tileSize) - data.tileSize * 3, data.tileSize * 6, data.tileSize * 6));
             boolean running = true;
             here:
@@ -458,6 +546,8 @@ public class World implements Disposable, SaveFileContent {
                 running = false;
                 for (BiomeData biome : data.GetBiomes()) {
                     biomeIndex2++;
+                    float poiCX = overrideCenterX != null ? overrideCenterX[biomeIndex2] : biome.startPointX;
+                    float poiCY = overrideCenterY != null ? overrideCenterY[biomeIndex2] : biome.startPointY;
                     for (PointOfInterestData poi : biome.getPointsOfInterest()) {
                         for (int i = 0; i < poi.count; i++) {
                             for (int counter = 0; counter < 500; counter++)//tries 500 times to find a free point
@@ -466,10 +556,10 @@ public class World implements Disposable, SaveFileContent {
                                 float theta = (float) (random.nextDouble() * 2 * Math.PI);
                                 float x = (float) (radius * Math.cos(theta));
                                 x *= (biome.width * width / 2);
-                                x += (biome.startPointX * width);
+                                x += (poiCX * width);
                                 float y = (float) (radius * Math.sin(theta));
                                 y *= (biome.height * height / 2);
-                                y += (height - (biome.startPointY * height));
+                                y += (height - (poiCY * height));
 
                                 y += (poi.offsetY * (biome.height * height));
                                 x += (poi.offsetX * (biome.width * width));
@@ -516,7 +606,7 @@ public class World implements Disposable, SaveFileContent {
                                             towns.clear();
                                             notTowns.clear();
                                             otherPoints.clear();
-                                            clearTerrain((int) (data.width * data.playerStartPosX), (int) (data.height * data.playerStartPosY), 10);
+                                            clearTerrain((int) (data.width * psX), (int) (data.height * psY), 10);
                                             storedInfo.clear();
                                             continue here;
                                         }

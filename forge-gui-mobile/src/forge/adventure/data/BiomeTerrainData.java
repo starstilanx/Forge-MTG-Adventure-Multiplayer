@@ -6,7 +6,7 @@ package forge.adventure.data;
  * BiomeData
  * contains the information for the terrain distribution
  */
-public class BiomeTerrainData {
+public class BiomeTerrainData implements java.io.Serializable {
     //sprite name in the biome atlas file
     public String spriteName;
     //minimum noise value where to place the terrain

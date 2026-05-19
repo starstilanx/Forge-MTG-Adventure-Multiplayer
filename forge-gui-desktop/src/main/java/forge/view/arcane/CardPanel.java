@@ -134,6 +134,10 @@ public class CardPanel extends SkinnedPanel implements CardContainer, IDisposabl
     private static Font smallCounterFont;
     private static Font largeCounterFont;
 
+    // VFX animation state — null means no active animation (identity transform).
+    // Written by CardAnimator (EDT), read in paint() (EDT).
+    private forge.screens.match.vfx.CardAnimState cardAnimState;
+
     static {
 
         try {
@@ -293,11 +297,26 @@ public class CardPanel extends SkinnedPanel implements CardContainer, IDisposabl
             super.validate();
         }
         Graphics2D g2d = (Graphics2D) g;
-        if (getTappedAngle() > 0) {
-            g2d = (Graphics2D) g2d.create();
-            final float edgeOffset = cardWidth / 2f;
-            g2d.rotate(getTappedAngle(), cardXOffset + edgeOffset, (cardYOffset + cardHeight)
-                    - edgeOffset);
+        final forge.screens.match.vfx.CardAnimState anim = cardAnimState;
+        final boolean hasTap  = getTappedAngle() > 0;
+        final boolean hasAnim = anim != null && !anim.isIdentity();
+        if (hasTap || hasAnim) {
+            g2d = (Graphics2D) g.create();
+            if (hasTap) {
+                final float edgeOffset = cardWidth / 2f;
+                g2d.rotate(getTappedAngle(), cardXOffset + edgeOffset, (cardYOffset + cardHeight) - edgeOffset);
+            }
+            if (hasAnim) {
+                final float cx = cardXOffset + cardWidth  / 2f;
+                final float cy = cardYOffset + cardHeight / 2f;
+                g2d.translate(cx + anim.dx, cy + anim.dy);
+                g2d.scale(anim.scale, anim.scale);
+                g2d.translate(-cx, -cy);
+                if (anim.alpha < 1f) {
+                    g2d.setComposite(java.awt.AlphaComposite.getInstance(
+                            java.awt.AlphaComposite.SRC_OVER, Math.max(0f, Math.min(1f, anim.alpha))));
+                }
+            }
         }
         super.paint(g2d);
     }
@@ -1222,6 +1241,11 @@ public class CardPanel extends SkinnedPanel implements CardContainer, IDisposabl
         imagePanel.setImage(null);
         imagePanel = null;
         card = null;
+    }
+
+    /** Called by CardAnimator (EDT only). Pass null to clear the animation. */
+    public void setCardAnimState(final forge.screens.match.vfx.CardAnimState state) {
+        this.cardAnimState = state;
     }
 
     public static CardPanel getDragAnimationPanel() {

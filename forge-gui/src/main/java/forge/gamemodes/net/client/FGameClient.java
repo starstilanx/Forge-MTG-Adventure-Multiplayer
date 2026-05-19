@@ -5,6 +5,8 @@ import forge.game.player.PlayerView;
 import forge.gamemodes.net.CompatibleObjectDecoder;
 import forge.gamemodes.net.CompatibleObjectEncoder;
 import forge.gamemodes.net.NetworkLogConfig;
+import forge.gamemodes.net.adventure.AdventureNetSession;
+import forge.gamemodes.net.adventure.AdventureProtocolHandler;
 import forge.util.IHasForgeLog;
 import forge.gamemodes.net.ReplyPool;
 import forge.gamemodes.net.event.*;
@@ -73,6 +75,12 @@ public class FGameClient implements IToServer, IHasForgeLog {
                             new IdleStateHandler(0, HEARTBEAT_INTERVAL_SECONDS, 0, TimeUnit.SECONDS),
                             new MessageHandler(),
                             new LobbyUpdateHandler(),
+                            new AdventureProtocolHandler(event -> {
+                                final AdventureNetSession session = AdventureNetSession.getInstance();
+                                if (session.isActiveClient() && session.clientLobby != null) {
+                                    session.clientLobby.dispatch(event);
+                                }
+                            }),
                             new GameClientHandler(FGameClient.this));
                 }
              });

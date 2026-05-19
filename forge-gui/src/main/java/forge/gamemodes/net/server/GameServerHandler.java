@@ -34,7 +34,10 @@ final class GameServerHandler extends GameProtocolHandler<IGameController> imple
     @Override
     protected IGameController getToInvoke(final ChannelHandlerContext ctx) {
         final RemoteClient client = getClient(ctx);
-        return client != null ? server.getController(client.getIndex()) : null;
+        if (client == null) return null;
+        final IGameController c = server.getController(client.getIndex());
+        System.out.println("[AdventureMP] GameServerHandler.getToInvoke: slot=" + client.getIndex() + " controller=" + (c != null ? c.getClass().getSimpleName() : "null"));
+        return c;
     }
 
     @Override

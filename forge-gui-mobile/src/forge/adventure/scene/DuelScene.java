@@ -37,7 +37,13 @@ import forge.gui.FThreads;
 import forge.gui.interfaces.IGuiGame;
 import forge.item.IPaperCard;
 import forge.item.PaperCard;
+import forge.gamemodes.match.LobbySlot;
+import forge.gamemodes.match.LobbySlotType;
+import forge.gamemodes.net.adventure.AdventureNetSession;
+import forge.gamemodes.net.server.FServerManager;
+import forge.gamemodes.net.server.ServerAdventureLobby;
 import forge.player.GamePlayerUtil;
+import forge.player.LobbyPlayerHuman;
 import forge.player.PlayerControllerHuman;
 import forge.screens.FScreen;
 import forge.screens.LoadingOverlay;
@@ -48,7 +54,6 @@ import forge.sound.SoundSystem;
 import forge.toolbox.FCardPanel;
 import forge.toolbox.FDisplayObject;
 import forge.toolbox.FOptionPane;
-import forge.trackable.TrackableCollection;
 import forge.util.Aggregates;
 import forge.util.StreamUtil;
 import org.apache.commons.lang3.tuple.Pair;
@@ -100,6 +105,18 @@ public class DuelScene extends ForgeScene {
     }
 
     public void GameEnd() {
+        if (hostedMatch == null) {
+            // Network client — no host-side processing (rewards, enemy records, etc.)
+            // Just restore the adventure map and its input processor.
+            endRunnable = () -> Gdx.app.postRunnable(() -> {
+                GameHUD.getInstance().updateBGM();
+                Forge.clearTransitionScreen();
+                Forge.clearScreenStack();
+                GameScene.instance().enter(); // restores HudScene input processor
+            });
+            exitDuelScene();
+            return;
+        }
         //TODO: Progress towards applicable Adventure quests also needs to be reported here.
         if (eventData != null)
             eventData.nextOpponent = null;
@@ -199,6 +216,10 @@ public class DuelScene extends ForgeScene {
 
     void afterGameEnd(String enemyName, boolean winner) {
         Forge.advFreezePlayerControls = winner;
+        final AdventureNetSession endNetSession = AdventureNetSession.getInstance();
+        if (endNetSession.isActiveHost()) {
+            endNetSession.serverLobby.onBattleEnd(winner);
+        }
         endRunnable = () -> Gdx.app.postRunnable(() -> {
             GameHUD.getInstance().updateBGM();
             dungeonEffect = null;
@@ -217,6 +238,18 @@ public class DuelScene extends ForgeScene {
 
     public void exitDuelScene() {
         Forge.setTransitionScreen(new TransitionScreen(endRunnable, Forge.takeScreenshot(), false, false));
+    }
+
+    /**
+     * Called on adventure clients when BATTLE_INIT arrives from the server.
+     * Opens the match screen; game state is set up by GameClientHandler once
+     * the server broadcasts openView to this client.
+     *
+     * @param enemyDataPayload serialized enemy payload from the server (reserved for future use)
+     */
+    public void enterAsNetworkClient(final Object enemyDataPayload) {
+        SoundSystem.instance.stopBackgroundMusic();
+        super.enter();
     }
 
     private FOptionPane createFOption(String message, String title, FBufferedImage icon, Runnable runnable) {
@@ -345,6 +378,13 @@ public class DuelScene extends ForgeScene {
             playerCount++;
             currentEnemy = currentEnemy.nextEnemy;
         }
+        final AdventureNetSession netSession = AdventureNetSession.getInstance();
+        if (netSession.isActiveHost()) {
+            for (int si = 1; si < netSession.serverLobby.getNumberOfSlots(); si++) {
+                if (netSession.serverLobby.getSlot(si).getType() == LobbySlotType.REMOTE)
+                    playerCount++;
+            }
+        }
 
         humanPlayer = RegisteredPlayer.forVariants(playerCount, appliedVariants, playerDeck, null, false, null, null);
         LobbyPlayer playerObject = GamePlayerUtil.getGuiPlayer();
@@ -443,7 +483,17 @@ public class DuelScene extends ForgeScene {
             }
             RegisteredPlayer aiPlayer = RegisteredPlayer.forVariants(playerCount, appliedVariants, deck, null, false, null, null);
 
-            LobbyPlayer enemyPlayer = GamePlayerUtil.createAiPlayer(currentEnemy.getName(), selectAI(currentEnemy.ai));
+            String aiProfile;
+            if (Config.instance().getSettingData().enableGeminiAi) {
+                String geminiModel = Config.instance().getSettingData().geminiModel;
+                if (geminiModel != null && !geminiModel.isEmpty()) {
+                    System.setProperty("forge.gemini.model", geminiModel);
+                }
+                aiProfile = "Gemini";
+            } else {
+                aiProfile = selectAI(currentEnemy.ai);
+            }
+            LobbyPlayer enemyPlayer = GamePlayerUtil.createAiPlayer(currentEnemy.getName(), aiProfile);
             enemyPlayer.setName(enemy.getName()); //Override name if defined in the map.(only supported for 1 enemy atm)
             TextureRegion enemyAvatar = enemy.getAvatar(i);
             enemyAvatar.flip(true, false); //flip facing left
@@ -492,6 +542,28 @@ public class DuelScene extends ForgeScene {
 
         final Map<RegisteredPlayer, IGuiGame> guiMap = new HashMap<>();
         guiMap.put(humanPlayer, MatchController.instance);
+        if (netSession.isActiveHost()) {
+            final ServerAdventureLobby serverLobby = netSession.serverLobby;
+            for (int si = 1; si < serverLobby.getNumberOfSlots(); si++) {
+                final LobbySlot slot = serverLobby.getSlot(si);
+                if (slot.getType() != LobbySlotType.REMOTE) continue;
+                final IGuiGame remoteGui = FServerManager.getInstance().getGui(si);
+                if (remoteGui == null) continue;
+                // Use stored player state if available; otherwise fall back to host values.
+                final String[] state = serverLobby.getPlayerState(si);
+                final Deck remoteDeck = buildRemoteDeck(state, playerDeck);
+                final int remoteLife = resolveRemoteLife(state, eventData, advPlayer);
+                final RegisteredPlayer remotePlayer = RegisteredPlayer.forVariants(
+                        playerCount, appliedVariants, remoteDeck, null, false, null, null);
+                final LobbyPlayerHuman remoteLobbyPlayer = new LobbyPlayerHuman(
+                        slot.getName(), slot.getAvatarIndex(), slot.getSleeveIndex());
+                remotePlayer.setPlayer(remoteLobbyPlayer);
+                remotePlayer.setTeamNumber(0);
+                remotePlayer.setStartingLife(remoteLife);
+                players.add(remotePlayer);
+                guiMap.put(remotePlayer, remoteGui);
+            }
+        }
 
         hostedMatch = MatchController.hostMatch();
 
@@ -513,6 +585,35 @@ public class DuelScene extends ForgeScene {
 
         //hostedMatch.setEndGameHook(() -> DuelScene.this.GameEnd());
         hostedMatch.startMatch(rules, appliedVariants, players, guiMap, bossBattle ? MusicPlaylist.BOSS : MusicPlaylist.MATCH);
+        // In adventure multiplayer, GameLobby.startGame() is never called so
+        // GameLobby.gameControllers is never populated.  GameServerHandler routes
+        // incoming client messages (selectButtonOk, etc.) through getController(slotIndex),
+        // which returns null when the map is empty — silently dropping all client inputs.
+        // Populate the map here by matching game player names to lobby slot names.
+        if (netSession.isActiveHost()) {
+            System.out.println("[AdventureMP] DuelScene: populating GameLobby controllers for " + hostedMatch.getGame().getPlayers().size() + " players, " + netSession.serverLobby.getNumberOfSlots() + " slots");
+            for (final Player p : hostedMatch.getGame().getPlayers()) {
+                if (!(p.getController() instanceof PlayerControllerHuman pch)) {
+                    System.out.println("[AdventureMP] DuelScene: skipping non-human player=" + p.getName());
+                    continue;
+                }
+                final String name = p.getRegisteredPlayer().getPlayer().getName();
+                boolean matched = false;
+                for (int si = 0; si < netSession.serverLobby.getNumberOfSlots(); si++) {
+                    final LobbySlot lobbySlot = netSession.serverLobby.getSlot(si);
+                    System.out.println("[AdventureMP] DuelScene: checking slot=" + si + " slotName='" + lobbySlot.getName() + "' vs playerName='" + name + "'");
+                    if (name.equals(lobbySlot.getName())) {
+                        netSession.serverLobby.registerController(lobbySlot, pch);
+                        System.out.println("[AdventureMP] DuelScene registered controller for slot=" + si + " name=" + name + " ctrl=" + pch.getClass().getSimpleName());
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched) {
+                    System.out.println("[AdventureMP] DuelScene: WARNING no slot matched for human player name='" + name + "'");
+                }
+            }
+        }
         MatchController.instance.setGameView(hostedMatch.getGameView());
         boolean showMessages = enemy.getData().boss || (enemy.getData().copyPlayerDeck && Current.player().isUsingCustomDeck());
         LoadingOverlay matchOverlay;
@@ -531,14 +632,12 @@ public class DuelScene extends ForgeScene {
         } else {
             matchOverlay = new LoadingOverlay(null);
         }
-        for (final Player p : hostedMatch.getGame().getPlayers()) {
-            if (p.getController() instanceof PlayerControllerHuman) {
-                final PlayerControllerHuman humanController = (PlayerControllerHuman) p.getController();
-                humanController.setGui(MatchController.instance);
-                MatchController.instance.setOriginalGameController(p.getView(), humanController);
-                MatchController.instance.openView(new TrackableCollection<>(p.getView()));
-            }
-        }
+        // NOTE: HostedMatch.startMatch() already calls setGui / setOriginalGameController /
+        // openView for every human player via guiMap.  Repeating those calls here with
+        // MatchController.instance for ALL PlayerControllerHuman instances was harmless in
+        // single-player but in multiplayer it overwrote the remote client's RemoteClientGuiGame
+        // with the host's MatchController — making the host handle the client's prompts and
+        // showing the client's perspective on the host's screen (last openView wins).
         super.enter();
         matchOverlay.show();
     }
@@ -620,6 +719,35 @@ public class DuelScene extends ForgeScene {
         return section.toFlatList().stream()
                 .filter(e -> e.getCardName().equals(cardName))
                 .collect(StreamUtil.random(copies));
+    }
+
+    /**
+     * Builds the deck for a remote player from their stored PLAYER_STATE.
+     * Falls back to the host's own deck if no state has been received yet.
+     */
+    private static Deck buildRemoteDeck(final String[] state, final Deck fallback) {
+        if (state == null || state.length < 4 || state[3].isEmpty()) return fallback;
+        try {
+            final forge.deck.CardPool pool = forge.deck.CardPool.fromCardList(
+                    java.util.Arrays.asList(state[3].split("\n")));
+            final Deck d = new Deck(state[0]);
+            d.putSection(DeckSection.Main, pool);
+            return d;
+        } catch (final Exception e) {
+            System.err.println("[AdventureMP] buildRemoteDeck failed: " + e.getMessage());
+            return fallback;
+        }
+    }
+
+    /** Returns the starting life for a remote player from stored state, with fallback. */
+    private static int resolveRemoteLife(final String[] state,
+                                         final AdventureEventData eventData,
+                                         final AdventurePlayer advPlayer) {
+        if (eventData != null) return eventData.eventRules.startingLife;
+        if (state != null && state.length >= 3) {
+            try { return Integer.parseInt(state[2]); } catch (final NumberFormatException ignored) { }
+        }
+        return advPlayer.getLife();
     }
 
     private static void applyAdventureCommandZoneRules(Deck playerDeck, DeckFormat format) {
@@ -725,6 +853,7 @@ public class DuelScene extends ForgeScene {
                 case "reckless" -> "Reckless";
                 case "cautious" -> "Cautious";
                 case "experimental" -> "Experimental";
+                case "gemini" -> "Gemini";
                 default -> ""; //User settings.
             };
         }

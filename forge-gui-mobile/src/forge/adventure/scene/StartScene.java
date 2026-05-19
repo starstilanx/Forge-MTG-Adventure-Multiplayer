@@ -14,8 +14,10 @@ import forge.adventure.util.Controls;
 import forge.adventure.world.WorldSave;
 import forge.assets.FSkinTexture;
 import forge.gui.GuiBase;
+import forge.gamemodes.net.adventure.AdventureNetSession;
 import forge.localinstance.properties.ForgeProfileProperties;
 import forge.screens.TransitionScreen;
+
 import forge.sound.SoundSystem;
 import forge.util.ZipUtil;
 
@@ -29,6 +31,7 @@ public class StartScene extends UIScene {
     private static StartScene object;
     Dialog exitDialog, backupDialog, zipDialog, unzipDialog;
     TextraButton saveButton, resumeButton, continueButton;
+    TextraButton btnHostAdventure, btnJoinAdventure;
     TypingLabel version = Controls.newTypingLabel("{GRADIENT}[%80]v." + Forge.getDeviceAdapter().getVersionString() + "{ENDGRADIENT}");
 
 
@@ -45,7 +48,6 @@ public class StartScene extends UIScene {
         ui.onButtonPress("Exit", StartScene.this::Exit);
         ui.onButtonPress("Switch", StartScene.this::switchToClassic);
 
-
         saveButton = ui.findActor("Save");
         resumeButton = ui.findActor("Resume");
         continueButton = ui.findActor("Continue");
@@ -55,6 +57,14 @@ public class StartScene extends UIScene {
         version.setHeight(5);
         version.skipToTheEnd();
         ui.addActor(version);
+
+        // Multiplayer buttons — added programmatically, positioned in enter()
+        btnHostAdventure = Controls.newTextButton("[%80]Host MP", this::hostAdventure);
+        btnJoinAdventure = Controls.newTextButton("[%80]Join MP", this::joinAdventure);
+        btnHostAdventure.setVisible(false);
+        btnJoinAdventure.setVisible(false);
+        ui.addActor(btnHostAdventure);
+        ui.addActor(btnJoinAdventure);
     }
 
     public static StartScene instance() {
@@ -264,7 +274,42 @@ public class StartScene extends UIScene {
             GameStage.maximumScrollDistance = 4f;
         }
 
+        // Show multiplayer Host/Join buttons only when a world is loaded,
+        // positioned directly below the Exit button so they don't overlap anything.
+        boolean worldLoaded = WorldSave.getCurrentSave().getWorld().getData() != null;
+        if (worldLoaded) {
+            TextraButton exitButton = ui.findActor("Exit");
+            if (exitButton != null) {
+                float btnH  = exitButton.getHeight();
+                float gap   = 4f;
+                float y     = exitButton.getY() - btnH - gap;
+                float halfW = (exitButton.getWidth() - gap) / 2f;
+                btnHostAdventure.setBounds(exitButton.getX(), y, halfW, btnH);
+                btnJoinAdventure.setBounds(exitButton.getX() + halfW + gap, y, halfW, btnH);
+            }
+        }
+        btnHostAdventure.setVisible(worldLoaded);
+        btnJoinAdventure.setVisible(worldLoaded);
+
         super.enter();
+    }
+
+    /** Host an Adventure multiplayer session from within a loaded world. */
+    public boolean hostAdventure() {
+        final AdventureNetSession session = AdventureNetSession.getInstance();
+        session.isMultiplayer = true;
+        session.isHost = true;
+        Forge.switchScene(LobbyScene.getInstance());
+        return true;
+    }
+
+    /** Join an Adventure multiplayer session. */
+    public boolean joinAdventure() {
+        final AdventureNetSession session = AdventureNetSession.getInstance();
+        session.isMultiplayer = true;
+        session.isHost = false;
+        Forge.switchScene(LobbyScene.getInstance());
+        return true;
     }
 
     private void NewGamePlus() {

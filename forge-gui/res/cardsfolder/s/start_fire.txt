@@ -1,4 +1,0 @@
-CopyFaceFrom:Start
-AlternateMode:Split
-ALTERNATE
-CopyFaceFrom:Fire

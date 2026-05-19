@@ -70,11 +70,13 @@ public class NetGameController implements IGameController {
 
     @Override
     public void selectButtonOk() {
+        System.out.println("[AdventureMP] NetGameController.selectButtonOk() — sending to server");
         send(ProtocolMethod.selectButtonOk);
     }
 
     @Override
     public void selectButtonCancel() {
+        System.out.println("[AdventureMP] NetGameController.selectButtonCancel() — sending to server");
         send(ProtocolMethod.selectButtonCancel);
     }
 

@@ -146,6 +146,9 @@ public abstract class GameLobby implements IHasGameType {
     public IGameController getController(final int index) {
         return gameControllers.get(getSlot(index));
     }
+    public void registerController(final LobbySlot slot, final IGameController controller) {
+        gameControllers.put(slot, controller);
+    }
     public GameView getGameView() {
         return hostedMatch.getGameView();
     }
@@ -156,6 +159,11 @@ public abstract class GameLobby implements IHasGameType {
     public abstract boolean mayRemove(int index);
     protected abstract IGuiGame getGui(int index);
     protected abstract void onGameStarted();
+
+    /** Assign an incoming client to the first open slot. Returns the assigned index, or -1 if full. */
+    public int connectPlayer(final String name, final int avatarIndex, final int sleeveIndex) { return -1; }
+    /** Release the slot at {@code index} back to OPEN. */
+    public void disconnectPlayer(final int index) { }
 
     public void addSlot() {
         final int newIndex = getNumberOfSlots();

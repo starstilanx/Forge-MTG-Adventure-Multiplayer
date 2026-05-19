@@ -1,5 +1,6 @@
 package forge.adventure.stage;
 
+import com.badlogic.gdx.Gdx;
 import com.badlogic.gdx.Input;
 import com.badlogic.gdx.controllers.Controller;
 import com.badlogic.gdx.files.FileHandle;
@@ -51,6 +52,11 @@ import forge.card.ColorSet;
 import forge.deck.Deck;
 import forge.deck.DeckProxy;
 import forge.game.GameType;
+import forge.adventure.character.RemotePlayerSprite;
+import forge.gamemodes.match.LobbySlot;
+import forge.gamemodes.match.LobbySlotType;
+import forge.gamemodes.net.adventure.AdventureNetEvent;
+import forge.gamemodes.net.adventure.AdventureNetSession;
 import forge.gui.FThreads;
 import forge.gui.GuiBase;
 import forge.screens.CoverScreen;
@@ -58,6 +64,7 @@ import forge.util.MyRandom;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Map.Entry;
 
 /**
  * Base class to render a player sprite on a map
@@ -274,6 +281,182 @@ public abstract class GameStage extends Stage {
 
     HashMap<PlayerModification, Float> currentModifications = new HashMap<>();
 
+    // -------------------------------------------------------------------------
+    // Multiplayer — remote player sprites and position sync
+    // -------------------------------------------------------------------------
+
+    private static final float NET_TICK_RATE = 0.05f; // 20 Hz
+    private float netTickAccumulator = 0f;
+    /** Slot index → remote sprite for every other player in this stage. */
+    protected final Map<Integer, RemotePlayerSprite> remotePlayers = new HashMap<>();
+
+    /** Create a remote player sprite and add it to this stage's scene graph. */
+    public void addRemotePlayer(final int slotIndex, final String name, final String spritePath,
+                                final float spawnX, final float spawnY) {
+        if (remotePlayers.containsKey(slotIndex)) return;
+        final RemotePlayerSprite sprite = new RemotePlayerSprite(
+                slotIndex, name, spritePath, spawnX, spawnY);
+        remotePlayers.put(slotIndex, sprite);
+        foregroundSprites.addActor(sprite);
+    }
+
+    /** Update the target position of a remote player's sprite (called on PLAYER_MOVE). */
+    public void updateRemotePlayer(final int slotIndex, final float x, final float y) {
+        final RemotePlayerSprite sprite = remotePlayers.get(slotIndex);
+        if (sprite != null) sprite.setTargetPosition(x, y);
+    }
+
+    /** Swap the sprite atlas for a remote player (called on PLAYER_STATE). */
+    public void applyRemotePlayerSprite(final int slotIndex, final String spriteName) {
+        final RemotePlayerSprite sprite = remotePlayers.get(slotIndex);
+        if (sprite != null) sprite.updateSprite(spriteName);
+    }
+
+    /** Remove and dispose a remote player's sprite (called on PLAYER_LEAVE). */
+    public void removeRemotePlayer(final int slotIndex) {
+        final RemotePlayerSprite sprite = remotePlayers.remove(slotIndex);
+        if (sprite != null) sprite.remove();
+    }
+
+    /** Collect all player positions as a flat array { p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y }. */
+    public float[] collectPlayerPositions() {
+        final float[] out = new float[8];
+        if (player != null) {
+            out[0] = player.pos().x;
+            out[1] = player.pos().y;
+        }
+        for (final Entry<Integer, RemotePlayerSprite> entry : remotePlayers.entrySet()) {
+            final int slot = entry.getKey();
+            if (slot >= 1 && slot <= 3) {
+                out[slot * 2]     = entry.getValue().pos().x;
+                out[slot * 2 + 1] = entry.getValue().pos().y;
+            }
+        }
+        return out;
+    }
+
+    /** Unfreeze the map and restore pre-battle positions (called on BATTLE_END). */
+    public void resumeAfterBattle() {
+        Forge.advFreezePlayerControls = false;
+        final AdventureNetSession netSession = AdventureNetSession.getInstance();
+        if (netSession.isActiveHost()) {
+            if (player != null) {
+                player.setPosition(
+                        netSession.serverLobby.getPreBattleX(0),
+                        netSession.serverLobby.getPreBattleY(0));
+            }
+            for (final Entry<Integer, RemotePlayerSprite> entry : remotePlayers.entrySet()) {
+                final int slot = entry.getKey();
+                entry.getValue().snapToPosition(
+                        netSession.serverLobby.getPreBattleX(slot),
+                        netSession.serverLobby.getPreBattleY(slot));
+            }
+        }
+    }
+
+    /**
+     * Register this stage as the event listener on the ClientAdventureLobby.
+     * The listener is an instance method so all callbacks reference {@code this} stage,
+     * ensuring that remote sprites are added to the correct scene graph when stages change.
+     */
+    public void registerClientListener() {
+        final AdventureNetSession session = AdventureNetSession.getInstance();
+        if (!session.isActiveClient()) return;
+        final GameStage self = this;
+        session.clientLobby.setEventListener(event -> {
+            switch (event.type) {
+                case MAP_SYNC:
+                    if (event.payload instanceof byte[]) {
+                        final byte[] syncBytes = (byte[]) event.payload;
+                        Gdx.app.postRunnable(() -> {
+                            forge.adventure.scene.LobbyScene.applySyncPayload(syncBytes);
+                        });
+                    }
+                    break;
+                case PLAYER_MOVE:
+                    if (event.payload instanceof float[]) {
+                        final float[] pos = (float[]) event.payload;
+                        Gdx.app.postRunnable(() -> {
+                            for (int slot = 0; slot < 4 && slot * 2 + 1 < pos.length; slot++) {
+                                if (slot == session.mySlotIndex) continue;
+                                // Skip world-map updates for players inside a POI: their
+                                // PLAYER_MOVE carries local map coordinates, not world coords.
+                                // When both players are in the same MapStage the coordinates
+                                // match and updates should be applied normally.
+                                if (session.slotsInPoi.contains(slot) && !(self instanceof MapStage)) continue;
+                                self.updateRemotePlayer(slot, pos[slot * 2], pos[slot * 2 + 1]);
+                            }
+                        });
+                    }
+                    break;
+                case PLAYER_JOIN:
+                    if (event.payload instanceof String[]) {
+                        final String[] data = (String[]) event.payload;
+                        if (data.length >= 4) {
+                            final int slot = Integer.parseInt(data[0]);
+                            final String joinName = data[1];
+                            final float sx = Float.parseFloat(data[2]);
+                            final float sy = Float.parseFloat(data[3]);
+                            session.remotePlayerNames.put(slot, joinName);
+                            // Use slot index only — name comparison incorrectly matches when both
+                            // players happen to share the same character name.
+                            final boolean isMe = session.clientLobby != null
+                                    && session.clientLobby.getLocalPlayer() == slot;
+                            if (isMe) {
+                                session.mySlotIndex = slot;
+                                break; // don't create a sprite for ourselves
+                            }
+                            final String[] state = session.remotePlayerStates.get(slot);
+                            final String spritePath = (state != null && state.length > 0)
+                                    ? state[0] : Current.player().spriteName();
+                            Gdx.app.postRunnable(() -> self.addRemotePlayer(slot, joinName, spritePath, sx, sy));
+                        }
+                    }
+                    break;
+                case PLAYER_LEAVE:
+                    if (event.payload instanceof Integer) {
+                        final int idx = (Integer) event.payload;
+                        session.remotePlayerNames.remove(idx);
+                        Gdx.app.postRunnable(() -> self.removeRemotePlayer(idx));
+                    }
+                    break;
+                case BATTLE_INIT:
+                    Gdx.app.postRunnable(() -> {
+                        Forge.advFreezePlayerControls = true;
+                        forge.adventure.scene.DuelScene.instance().enterAsNetworkClient(event.payload);
+                    });
+                    break;
+                case BATTLE_END:
+                    Gdx.app.postRunnable(() -> self.resumeAfterBattle());
+                    break;
+                case PLAYER_ENTER_POI:
+                    // Host entered a POI: their subsequent PLAYER_MOVE packets carry local
+                    // map coordinates, not world coordinates. Freeze the world-map sprite so
+                    // it stays at the POI entrance rather than jumping to a wrong position.
+                    // If this client is already in MapStage (same town), updates still apply.
+                    session.slotsInPoi.add(0);
+                    break;
+                case PLAYER_EXIT_POI:
+                    session.slotsInPoi.remove(0);
+                    break;
+                case PLAYER_STATE:
+                    if (event.payload instanceof String[]) {
+                        final String[] stateData = (String[]) event.payload;
+                        if (stateData.length >= 3) {
+                            final int slotIdx = Integer.parseInt(stateData[0]);
+                            final String spriteName = stateData[1];
+                            final String hp = stateData[2];
+                            session.remotePlayerStates.put(slotIdx, new String[]{ spriteName, hp });
+                            Gdx.app.postRunnable(() -> self.applyRemotePlayerSprite(slotIdx, spriteName));
+                        }
+                    }
+                    break;
+                default:
+                    break;
+            }
+        });
+    }
+
     public void modifyPlayer(PlayerModification mod, float value) {
         currentModifications.merge(mod, value, Float::sum);
     }
@@ -402,6 +585,44 @@ public abstract class GameStage extends Stage {
 
 
         onActing(delta);
+
+        // ---- Multiplayer network tick ----
+        if (player != null) {
+            final AdventureNetSession netSession = AdventureNetSession.getInstance();
+            if (netSession.isActiveHost()) {
+                netSession.serverLobby.updateHostPosition(player.pos().x, player.pos().y);
+                netTickAccumulator += delta;
+                if (netTickAccumulator >= NET_TICK_RATE) {
+                    netTickAccumulator -= NET_TICK_RATE;
+                    // Refresh host-side remote sprites from accumulated client positions.
+                    final float[] allPos = netSession.serverLobby.getAllPositions();
+                    for (final Entry<Integer, RemotePlayerSprite> entry : remotePlayers.entrySet()) {
+                        final int slot = entry.getKey();
+                        if (slot * 2 + 1 < allPos.length) {
+                            entry.getValue().setTargetPosition(allPos[slot * 2], allPos[slot * 2 + 1]);
+                        }
+                    }
+                    netSession.serverLobby.broadcastAllPositions();
+                }
+            } else if (netSession.isActiveClient() && netSession.clientLobby != null) {
+                if (!netSession.clientLobby.hasEventListener()) {
+                    registerClientListener();
+                } else {
+                    // Send own position to server 20 Hz.
+                    netTickAccumulator += delta;
+                    if (netTickAccumulator >= NET_TICK_RATE && netSession.mySlotIndex >= 0
+                            && netSession.client != null) {
+                        netTickAccumulator -= NET_TICK_RATE;
+                        try {
+                            netSession.client.send(new AdventureNetEvent(
+                                    AdventureNetEvent.Type.PLAYER_MOVE,
+                                    new float[]{ (float) netSession.mySlotIndex,
+                                            player.pos().x, player.pos().y }));
+                        } catch (final Exception ignored) { }
+                    }
+                }
+            }
+        }
     }
 
     private void onRemoveEffect(PlayerModification mod) {
@@ -590,6 +811,66 @@ public abstract class GameStage extends Stage {
 
     public void enter() {
         stop();
+        netTickAccumulator = 0f;
+
+        // --- Multiplayer: rebuild remote sprites for this stage's scene graph ---
+        for (final RemotePlayerSprite s : remotePlayers.values()) s.remove();
+        remotePlayers.clear();
+
+        final AdventureNetSession session = AdventureNetSession.getInstance();
+        if (session.isMultiplayer) {
+            if (session.isActiveClient() && session.clientLobby != null) {
+                // Force re-registration so registerClientListener() captures `this` stage.
+                session.clientLobby.clearEventListener();
+                // Recreate sprites for players we already know about (stage transition).
+                for (final Entry<Integer, String> entry : session.remotePlayerNames.entrySet()) {
+                    final int slot = entry.getKey();
+                    if (slot == session.mySlotIndex) continue;
+                    final String[] state = session.remotePlayerStates.get(slot);
+                    final String spritePath = (state != null && state.length > 0)
+                            ? state[0] : Current.player().spriteName();
+                    addRemotePlayer(slot, entry.getValue(), spritePath, 0f, 0f);
+                }
+            } else if (session.isActiveHost() && session.serverLobby != null) {
+                // Recreate sprites for all currently connected remote clients.
+                if (session.clientLobby != null && session.clientLobby.getLocalPlayer() >= 0) {
+                    session.mySlotIndex = session.clientLobby.getLocalPlayer();
+                }
+                for (int i = 1; i < session.serverLobby.getNumberOfSlots(); i++) {
+                    final LobbySlot s = session.serverLobby.getSlot(i);
+                    if (s != null && s.getType() == LobbySlotType.REMOTE && s.getName() != null) {
+                        final float[] allPos = session.serverLobby.getAllPositions();
+                        // Fall back to host position if client position not yet received.
+                        final float sx = allPos[i * 2] != 0f ? allPos[i * 2] : allPos[0];
+                        final float sy = allPos[i * 2 + 1] != 0f ? allPos[i * 2 + 1] : allPos[1];
+                        final String[] state = session.remotePlayerStates.get(i);
+                        final String spritePath = (state != null && state.length > 0)
+                                ? state[0] : Current.player().spriteName();
+                        addRemotePlayer(i, s.getName(), spritePath, sx, sy);
+                    }
+                }
+                // Callbacks so the host stage stays in sync for both new joins and state updates.
+                final GameStage self = this;
+                session.onPlayerJoinCallback = slotIndex -> {
+                    final LobbySlot s2 = session.serverLobby.getSlot(slotIndex);
+                    Gdx.app.postRunnable(() -> {
+                        if (s2 != null && s2.getName() != null) {
+                            final float[] allPos = session.serverLobby.getAllPositions();
+                            // Use client's known position; fall back to host position if unknown.
+                            final float sx = allPos[slotIndex * 2] != 0f ? allPos[slotIndex * 2] : allPos[0];
+                            final float sy = allPos[slotIndex * 2 + 1] != 0f ? allPos[slotIndex * 2 + 1] : allPos[1];
+                            final String[] state = session.remotePlayerStates.get(slotIndex);
+                            final String spritePath = (state != null && state.length > 0)
+                                    ? state[0] : Current.player().spriteName();
+                            self.addRemotePlayer(slotIndex, s2.getName(), spritePath, sx, sy);
+                        }
+                    });
+                };
+                session.onRemotePlayerStateCallback = (slotIndex, spriteName) ->
+                        Gdx.app.postRunnable(() -> self.applyRemotePlayerSprite(slotIndex, spriteName));
+            }
+        }
+
         if (!extraAnnouncement.isEmpty()) {
             showImageDialog(extraAnnouncement, null, this::clearExtraAnnouncement);
         }

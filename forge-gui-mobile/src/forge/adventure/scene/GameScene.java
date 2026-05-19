@@ -66,6 +66,11 @@ public class GameScene extends HudScene {
             location = forHeader ? TileMapScene.instance().rootPoint.getDisplayName() : TileMapScene.instance().rootPoint.getData().type;
         } else {
             World world = Current.world();
+            // Guard: world or its data may be null when called before the world is loaded
+            // (e.g. from MatchScreen initializer in the online lobby path).
+            if (world == null || world.getData() == null) {
+                return location; // return last known location or empty string
+            }
             //this gets the name of the layer... this shoud be based on boundaries...
             int currentBiome = World.highestBiome(world.getBiomeMapXY((int) stage.getPlayerSprite().getX() / world.getTileSize(), (int) stage.getPlayerSprite().getY() / world.getTileSize()));
             List<BiomeData> biomeData = world.getData().GetBiomes();

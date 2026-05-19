@@ -69,6 +69,9 @@ public class RemoteClientGuiGame extends NetworkGuiGame implements IHasForgeLog 
         return client.isLibgdx();
     }
 
+    @Override
+    protected boolean isRemoteClientGui() { return true; }
+
     public void pause() {
         paused = true;
     }

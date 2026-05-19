@@ -44,7 +44,7 @@ public final class ParticleSystem {
         return !active.isEmpty() || !incoming.isEmpty();
     }
 
-    void clear() {
+    public void clear() {
         active.clear();
         incoming.clear();
     }

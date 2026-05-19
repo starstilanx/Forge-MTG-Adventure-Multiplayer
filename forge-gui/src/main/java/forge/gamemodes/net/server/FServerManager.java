@@ -4,6 +4,7 @@ import forge.ai.LobbyPlayerAi;
 import forge.ai.PlayerControllerAi;
 import forge.game.Game;
 import forge.game.player.Player;
+import forge.gamemodes.match.GameLobby;
 import forge.gamemodes.match.HostedMatch;
 import forge.gamemodes.match.LobbySlot;
 import forge.gamemodes.match.LobbySlotType;
@@ -12,6 +13,8 @@ import forge.gamemodes.net.ChatMessage;
 import forge.gamemodes.net.CompatibleObjectDecoder;
 import forge.gamemodes.net.CompatibleObjectEncoder;
 import forge.gamemodes.net.NetworkLogConfig;
+import forge.gamemodes.net.adventure.AdventureNetSession;
+import forge.gamemodes.net.adventure.AdventureProtocolHandler;
 import forge.util.IHasForgeLog;
 import forge.gamemodes.net.event.*;
 import forge.gui.GuiBase;
@@ -74,7 +77,7 @@ public final class FServerManager implements IHasForgeLog {
     private EventLoopGroup bossGroup = new NioEventLoopGroup(1);
     private EventLoopGroup workerGroup = new NioEventLoopGroup();
     private UpnpService upnpService = null;
-    private ServerGameLobby localLobby;
+    private GameLobby localLobby;
     private ILobbyListener lobbyListener;
     private boolean UPnPMapped = false;
     private int port;
@@ -155,6 +158,18 @@ public final class FServerManager implements IHasForgeLog {
                                     new RegisterClientHandler(),
                                     new LobbyInputHandler(),
                                     new DeregisterClientHandler(),
+                                    new AdventureProtocolHandler(event -> {
+                                        final AdventureNetSession session = AdventureNetSession.getInstance();
+                                        if (session.isActiveHost() && session.serverLobby != null) {
+                                            if (event.type == forge.gamemodes.net.adventure.AdventureNetEvent.Type.PLAYER_MOVE
+                                                    && event.payload instanceof float[]) {
+                                                session.serverLobby.onClientMove((float[]) event.payload);
+                                            } else if (event.type == forge.gamemodes.net.adventure.AdventureNetEvent.Type.PLAYER_STATE
+                                                    && event.payload instanceof String[]) {
+                                                session.serverLobby.onClientPlayerState((String[]) event.payload);
+                                            }
+                                        }
+                                    }),
                                     new GameServerHandler());
                         }
                     });
@@ -372,7 +387,7 @@ public final class FServerManager implements IHasForgeLog {
         to.send(event);
     }
 
-    public void setLobby(final ServerGameLobby lobby) {
+    public void setLobby(final GameLobby lobby) {
         this.localLobby = lobby;
     }
 
@@ -980,6 +995,9 @@ public final class FServerManager implements IHasForgeLog {
                         client.setIndex(index);
                         client.setLibgdx(event.isLibgdx());
                         if (index > 0) {
+                            if (localLobby instanceof ServerAdventureLobby advLobby) {
+                                advLobby.syncExistingPlayersTo(client);
+                            }
                             broadcast(new MessageEvent(String.format("%s joined the lobby.", event.getUsername())));
                             broadcastTo(new MessageEvent(formatAfkTimeoutMessage()),
                                     Collections.singleton(client));
@@ -1004,6 +1022,7 @@ public final class FServerManager implements IHasForgeLog {
                 }
             } else if (msg instanceof UpdateLobbyPlayerEvent event) {
                 updateSlot(client.getIndex(), event);
+                updateLobbyState();
             }
             // Note: MessageEvent is handled by MessageHandler, not here
             // to avoid duplicate display on host's chat

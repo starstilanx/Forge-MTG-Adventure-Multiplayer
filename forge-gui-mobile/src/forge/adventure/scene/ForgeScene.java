@@ -61,11 +61,13 @@ public abstract class ForgeScene extends Scene implements IUpdateable {
     @Override
     public void enter() {
         FOverlay.hideAll();
-        if (getScreen() != null)
-            getScreen().setSize(Forge.getScreenWidth(), Forge.getScreenHeight());
         //update language for ForgeScene
         Forge.getLocalizer().setEnglish(Forge.forcedEnglishonCJKMissing);
         Forge.openScreen(getScreen());
+        
+        if (getScreen() != null)
+            getScreen().setSize(Forge.getScreenWidth(), Forge.getScreenHeight());
+            
         Gdx.input.setInputProcessor(Forge.getInputProcessor());
     }
 

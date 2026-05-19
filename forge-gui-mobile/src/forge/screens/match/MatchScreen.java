@@ -125,8 +125,16 @@ public class MatchScreen extends FScreen {
         selectedPlayer = playerPanelsList.size() - 1;
 
         bottomPlayerPrompt = add(new VPrompt("", "",
-                e -> getGameController().selectButtonOk(),
-                e -> getGameController().selectButtonCancel()));
+                e -> {
+                    forge.interfaces.IGameController gc = getGameController();
+                    System.out.println("[AdventureMP] btnOk tapped, gc=" + (gc != null ? gc.getClass().getSimpleName() : "null") + " currentPlayer=" + MatchController.instance.getCurrentPlayer());
+                    if (gc != null) gc.selectButtonOk();
+                },
+                e -> {
+                    forge.interfaces.IGameController gc = getGameController();
+                    System.out.println("[AdventureMP] btnCancel tapped, gc=" + (gc != null ? gc.getClass().getSimpleName() : "null") + " currentPlayer=" + MatchController.instance.getCurrentPlayer());
+                    if (gc != null) gc.selectButtonCancel();
+                }));
 
         if (humanCount < 2 || MatchController.instance.hotSeatMode() || GuiBase.isNetPlay(MatchController.instance))
             topPlayerPrompt = null;

@@ -1,10 +1,10 @@
 package forge.adventure.data;
 
 
-public class BiomeStructureData {
+public class BiomeStructureData implements java.io.Serializable {
 
 
-    static public class BiomeStructureDataMapping
+    static public class BiomeStructureDataMapping implements java.io.Serializable
     {
         public int getColor() {
             return ((Integer.parseInt(color,16)<<8)|0xff);
