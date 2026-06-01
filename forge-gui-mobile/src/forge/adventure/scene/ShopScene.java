@@ -44,6 +44,10 @@ public class ShopScene extends ForgeScene {
         getScreen();
         screen.refresh();
         super.enter();
+        // Discard any stale FScreen behind the sell screen in Dscreens (e.g. the
+        // multiplayer lobby). Pressing back will then empty Dscreens →
+        // setCurrentScreen(null) → switchToLast() → InnScene, not the lobby.
+        Forge.retainOnlyCurrentScreen();
         processAutoSell();
     }
 

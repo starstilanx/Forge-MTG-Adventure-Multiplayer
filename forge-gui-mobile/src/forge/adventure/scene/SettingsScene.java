@@ -291,22 +291,22 @@ public class SettingsScene extends UIScene {
                 Config.instance().saveSettings();
             }
         });
-        String[] geminiModels = {
-            "gemini-3.1-flash-lite",
-            "gemini-3.1-pro-preview",
-            "gemini-3-flash-preview",
-            "gemini-2.5-flash",
-            "gemini-2.5-flash-lite",
-            "gemini-2.5-pro"
-        };
-        String savedGeminiModel = Config.instance().getSettingData().geminiModel;
-        if (savedGeminiModel == null || savedGeminiModel.isEmpty()) {
-            savedGeminiModel = geminiModels[0];
+
+        final boolean initUseVertex = Config.instance().getSettingData().useVertexAi;
+        final String initLoc;
+        {
+            String loc = Config.instance().getSettingData().vertexLocation;
+            initLoc = (loc == null || loc.isEmpty()) ? "us-central1" : loc;
         }
+
+        String[] initialModels = getModelsForRegion(initLoc, initUseVertex);
+        String savedGeminiModel = Config.instance().getSettingData().geminiModel;
+        if (savedGeminiModel == null || savedGeminiModel.isEmpty()) savedGeminiModel = initialModels[0];
         System.setProperty("forge.gemini.model", savedGeminiModel);
-        SelectBox<String> geminiModelBox = Controls.newComboBox(geminiModels, savedGeminiModel, o -> {
+
+        final SelectBox<String> geminiModelBox = Controls.newComboBox(initialModels, savedGeminiModel, o -> {
             String model = (String) o;
-            if (model == null || model.isEmpty()) model = geminiModels[0];
+            if (model == null || model.isEmpty()) return null;
             Config.instance().getSettingData().geminiModel = model;
             Config.instance().saveSettings();
             System.setProperty("forge.gemini.model", model);
@@ -323,27 +323,38 @@ public class SettingsScene extends UIScene {
                 Config.instance().getSettingData().useVertexAi = enabled;
                 System.setProperty("forge.gemini.useVertex", String.valueOf(enabled));
                 Config.instance().saveSettings();
+                String loc = Config.instance().getSettingData().vertexLocation;
+                if (loc == null || loc.isEmpty()) loc = "us-central1";
+                geminiModelBox.setItems(new com.badlogic.gdx.utils.Array<>(getModelsForRegion(loc, enabled)));
             }
         });
+
         String[] vertexLocations = {
-            "us-central1", "us-east1", "us-west1",
-            "europe-west1", "europe-west4",
-            "asia-east1", "asia-northeast1"
+            "global", "us", "eu",
+            "us-central1", "us-east1", "us-east4", "us-east5", "us-south1", "us-west1", "us-west4",
+            "northamerica-northeast1", "southamerica-east1",
+            "europe-west1", "europe-west2", "europe-west3", "europe-west4",
+            "europe-west6", "europe-west8", "europe-west9", "europe-north1",
+            "europe-central2", "europe-southwest1",
+            "asia-south1", "asia-southeast1", "asia-east1", "asia-east2",
+            "asia-northeast1", "asia-northeast3", "australia-southeast1",
+            "me-west1", "me-central1", "me-central2"
         };
-        String savedVertexLocation = Config.instance().getSettingData().vertexLocation;
-        if (savedVertexLocation == null || savedVertexLocation.isEmpty()) savedVertexLocation = vertexLocations[0];
-        System.setProperty("forge.gemini.vertexLocation", savedVertexLocation);
-        SelectBox<String> vertexLocationBox = Controls.newComboBox(vertexLocations, savedVertexLocation, o -> {
+        System.setProperty("forge.gemini.vertexLocation", initLoc);
+        SelectBox<String> vertexLocationBox = Controls.newComboBox(vertexLocations, initLoc, o -> {
             String loc = (String) o;
-            if (loc == null || loc.isEmpty()) loc = vertexLocations[0];
+            if (loc == null || loc.isEmpty()) loc = "us-central1";
             Config.instance().getSettingData().vertexLocation = loc;
             Config.instance().saveSettings();
             System.setProperty("forge.gemini.vertexLocation", loc);
+            boolean useVertex = Config.instance().getSettingData().useVertexAi;
+            geminiModelBox.setItems(new com.badlogic.gdx.utils.Array<>(getModelsForRegion(loc, useVertex)));
             return null;
         });
         addLabel("Vertex Location");
         settingGroup.add(vertexLocationBox).align(Align.right).pad(2);
         settingGroup.row();
+
         // Vertex Project ID (text field)
         {
             com.badlogic.gdx.scenes.scene2d.ui.TextField projField = Controls.newTextField("");
@@ -563,6 +574,56 @@ public class SettingsScene extends UIScene {
     public void dispose() {
         if (stage != null)
             stage.dispose();
+    }
+
+    private static String[] getModelsForRegion(String location, boolean useVertex) {
+        String[] gemini = {
+            "gemini-3.1-flash-lite", "gemini-3.1-pro-preview", "gemini-3-flash-preview",
+            "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
+        };
+        if (!useVertex || location == null) return gemini;
+
+        String[] extra;
+        switch (location) {
+            case "global":
+                extra = new String[]{
+                    "glm-4-7-maas", "glm-5-maas",
+                    "gpt-oss-120b-maas",
+                    "minimax-s2-maas",
+                    "qwen3-next-80b-a3b-thinking-maas", "qwen3-next-80b-a3b-instruct-maas",
+                    "qwen3-coder-480b-a35b-instruct-maas", "qwen3-235b-a22b-instruct-2507-maas"
+                };
+                break;
+            case "us-central1":
+                extra = new String[]{
+                    "deepseek-ocr-maas", "deepseek-v3.1-maas", "deepseek-r1-0528-maas",
+                    "gpt-oss-120b-maas", "gpt-oss-20b-maas",
+                    "multilingual-e5-small-maas", "multilingual-e5-large-instruct-maas"
+                };
+                break;
+            case "us-east1":
+                extra = new String[]{"deepseek-v3.2-maas"};
+                break;
+            case "us-east4":
+            case "us-east5":
+                extra = new String[]{
+                    "qwen3-coder-480b-a35b-instruct-maas", "qwen3-235b-a22b-instruct-2507-maas"
+                };
+                break;
+            case "europe-west2":
+            case "europe-west4":
+                extra = new String[]{
+                    "multilingual-e5-small-maas", "multilingual-e5-large-instruct-maas"
+                };
+                break;
+            default:
+                extra = new String[]{};
+        }
+
+        String[] result = new String[gemini.length + extra.length];
+        System.arraycopy(gemini, 0, result, 0, gemini.length);
+        System.arraycopy(extra, 0, result, gemini.length, extra.length);
+        return result;
     }
 
 }

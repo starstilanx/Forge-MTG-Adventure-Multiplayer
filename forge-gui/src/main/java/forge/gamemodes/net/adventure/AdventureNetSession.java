@@ -57,6 +57,29 @@ public final class AdventureNetSession {
     public int mySlotIndex = -1;
 
     /**
+     * Active multiplayer event (set on both host and client when an EVENT_INIT fires).
+     * Held as Object to avoid forge-gui depending on AdventureEventData (forge-gui-mobile type).
+     * forge-gui-mobile callers cast as needed.  Cleared when the event ends.
+     */
+    public Object activeEventData = null;
+
+    /**
+     * When non-null, buildClientPlayerStatePayload() sends this Deck instead of the player's
+     * regular getSelectedDeck() — used so the client's drafted event deck (which is stored in
+     * AdventureEventData.registeredDeck rather than the player's main deck slot) reaches the host.
+     * Held as Object to keep forge-gui free of forge.deck.Deck dependency in the cross-module path.
+     */
+    public Object activeEventDeck = null;
+
+    /**
+     * Host-side: set of remote slot indices that have signalled EVENT_READY for the active event.
+     * The host's startRound() flow uses this to wait until every connected client has finalized
+     * their drafted deck before broadcasting BATTLE_INIT.
+     */
+    public final java.util.Set<Integer> eventReadyClients =
+            java.util.Collections.newSetFromMap(new ConcurrentHashMap<>());
+
+    /**
      * Slot indices currently inside a POI (town/dungeon).
      * On the world map, PLAYER_MOVE updates are skipped for these slots because the
      * sender is broadcasting local map coordinates, not world coordinates.
@@ -78,6 +101,14 @@ public final class AdventureNetSession {
      */
     public java.util.function.BiConsumer<Integer, String> onRemotePlayerStateCallback = null;
 
+    /**
+     * Host-side callback: fired on the Netty IO thread when a BATTLE_REQUEST is received from a client.
+     * Argument is the Serializable EnemyData payload (kept as Serializable here to avoid forge-gui
+     * depending on forge-gui-mobile types).  Callee must cast to EnemyData and post GDX mutations
+     * via Gdx.app.postRunnable().  Typically wired in MapStage to call beginDuel(enemySprite).
+     */
+    public java.util.function.Consumer<java.io.Serializable> onBattleRequestCallback = null;
+
     // -------------------------------------------------------------------------
     // Lifecycle
     // -------------------------------------------------------------------------
@@ -94,9 +125,13 @@ public final class AdventureNetSession {
         mySlotIndex   = -1;
         onPlayerJoinCallback = null;
         onRemotePlayerStateCallback = null;
+        onBattleRequestCallback = null;
         remotePlayerStates.clear();
         slotsInPoi.clear();
         remotePlayerNames.clear();
+        activeEventData = null;
+        activeEventDeck = null;
+        eventReadyClients.clear();
     }
 
     /**

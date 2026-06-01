@@ -1105,11 +1105,24 @@ public class MapStage extends GameStage {
     
     public void beginDuel(EnemySprite mob) {
         if (mob == null) return;
-        // In multiplayer host mode, notify all clients before starting the duel locally.
         final AdventureNetSession netSession = AdventureNetSession.getInstance();
         if (netSession.isActiveHost()) {
+            // Host: notify all clients, then start the duel locally as usual.
             netSession.serverLobby.initiateBattle(
                     mob.getData(), collectPlayerPositions());
+        } else if (netSession.isActiveClient() && netSession.client != null) {
+            // Client: don't start a solo duel — ask the host to initiate the co-op battle.
+            // The host's BATTLE_REQUEST callback runs beginDuel(), which broadcasts BATTLE_INIT;
+            // this client's BATTLE_INIT listener will then pull us into DuelScene.enterAsNetworkClient.
+            try {
+                netSession.client.send(new forge.gamemodes.net.adventure.AdventureNetEvent(
+                        forge.gamemodes.net.adventure.AdventureNetEvent.Type.BATTLE_REQUEST,
+                        mob.getData()));
+            } catch (final Exception ex) {
+                System.err.println("[AdventureMP] Failed to send BATTLE_REQUEST: " + ex.getMessage());
+            }
+            // Don't transition locally — wait for the host's BATTLE_INIT broadcast.
+            return;
         }
         mob.clearCollisionHeight();
         currentMob = mob;

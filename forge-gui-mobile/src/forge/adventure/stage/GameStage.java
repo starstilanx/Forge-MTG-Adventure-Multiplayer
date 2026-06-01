@@ -34,9 +34,12 @@ import forge.adventure.data.DialogData;
 import forge.adventure.data.EffectData;
 import forge.adventure.data.PointOfInterestData;
 import forge.adventure.pointofintrest.PointOfInterest;
+import forge.adventure.data.EnemyData;
+import forge.adventure.scene.DuelScene;
 import forge.adventure.scene.Scene;
 import forge.adventure.scene.StartScene;
 import forge.adventure.scene.TileMapScene;
+import forge.adventure.util.Reward;
 import forge.adventure.util.Config;
 import forge.adventure.util.Controls;
 import forge.adventure.util.Current;
@@ -335,6 +338,80 @@ public abstract class GameStage extends Stage {
         return out;
     }
 
+    /**
+     * Build the full 10-field PLAYER_STATE payload that the host needs in order to
+     * reconstruct this client's RegisteredPlayer at battle start: slot, sprite, hp,
+     * main deck, commander section, and aggregated item/blessing battle effects.
+     *
+     * Used by both the PLAYER_JOIN "isMe" handler (initial send) and WorldStage.enter()
+     * (re-send after returning to the world map).  Both call sites must use the same
+     * 10-field shape — sending a shorter array overwrites the cached state on the
+     * server and causes the host to start the next battle without the client's
+     * commander or gear effects.
+     */
+    public static String[] buildClientPlayerStatePayload(final int slotIndex) {
+        // Prefer an active event-draft deck (held on AdventureNetSession.activeEventDeck) so the
+        // host's RegisteredPlayer for this slot is built from the cards the client actually picked
+        // during the shared-seed draft — not the player's pre-event main deck.
+        final Object activeEventDeckObj = AdventureNetSession.getInstance().activeEventDeck;
+        final Deck myDeck = (activeEventDeckObj instanceof Deck)
+                ? (Deck) activeEventDeckObj
+                : Current.player().getSelectedDeck();
+        final String ds = myDeck != null ? myDeck.getMain().toCardList("\n") : "";
+        final forge.deck.CardPool cmdPool = (myDeck != null)
+                ? myDeck.get(forge.deck.DeckSection.Commander) : null;
+        final String cs = (cmdPool != null && !cmdPool.isEmpty())
+                ? cmdPool.toCardList("\n") : "";
+        int effectLifeMod = 0, effectHandMod = 0;
+        int effectShards = Current.player().getShards();
+        final StringBuilder effectBfCards  = new StringBuilder();
+        final StringBuilder effectCmdCards = new StringBuilder();
+        for (Long itemId : Current.player().getEquippedItems()) {
+            final forge.adventure.data.ItemData itm = Current.player().getEquippedItem(itemId);
+            if (itm == null || itm.effect == null) continue;
+            effectLifeMod += itm.effect.lifeModifier;
+            effectHandMod += itm.effect.changeStartCards;
+            effectShards  += itm.effect.extraManaShards;
+            if (itm.effect.startBattleWithCard != null)
+                for (String c : itm.effect.startBattleWithCard) {
+                    if (effectBfCards.length() > 0) effectBfCards.append('\n');
+                    effectBfCards.append(c);
+                }
+            if (itm.effect.startBattleWithCardInCommandZone != null)
+                for (String c : itm.effect.startBattleWithCardInCommandZone) {
+                    if (effectCmdCards.length() > 0) effectCmdCards.append('\n');
+                    effectCmdCards.append(c);
+                }
+        }
+        final forge.adventure.data.EffectData blessing = Current.player().getBlessing();
+        if (blessing != null) {
+            effectLifeMod += blessing.lifeModifier;
+            effectHandMod += blessing.changeStartCards;
+            effectShards  += blessing.extraManaShards;
+            if (blessing.startBattleWithCard != null)
+                for (String c : blessing.startBattleWithCard) {
+                    if (effectBfCards.length() > 0) effectBfCards.append('\n');
+                    effectBfCards.append(c);
+                }
+            if (blessing.startBattleWithCardInCommandZone != null)
+                for (String c : blessing.startBattleWithCardInCommandZone) {
+                    if (effectCmdCards.length() > 0) effectCmdCards.append('\n');
+                    effectCmdCards.append(c);
+                }
+        }
+        return new String[]{
+                String.valueOf(slotIndex),
+                Current.player().spriteName(),
+                String.valueOf(Current.player().getLife()),
+                ds, cs,
+                String.valueOf(effectLifeMod),
+                String.valueOf(effectHandMod),
+                String.valueOf(effectShards),
+                effectBfCards.toString(),
+                effectCmdCards.toString()
+        };
+    }
+
     /** Unfreeze the map and restore pre-battle positions (called on BATTLE_END). */
     public void resumeAfterBattle() {
         Forge.advFreezePlayerControls = false;
@@ -384,6 +461,14 @@ public abstract class GameStage extends Stage {
                                 // When both players are in the same MapStage the coordinates
                                 // match and updates should be applied normally.
                                 if (session.slotsInPoi.contains(slot) && !(self instanceof MapStage)) continue;
+                                // Diagnostic: warn once if PLAYER_MOVE arrives for a slot we have no sprite for.
+                                if (self.remotePlayers.get(slot) == null && slot == 0
+                                        && self instanceof MapStage) {
+                                    System.err.println("[AdventureMP] WARN: PLAYER_MOVE for host slot 0 in MapStage "
+                                            + "but no sprite exists. remotePlayerNames="
+                                            + session.remotePlayerNames + " known sprites="
+                                            + self.remotePlayers.keySet());
+                                }
                                 self.updateRemotePlayer(slot, pos[slot * 2], pos[slot * 2 + 1]);
                             }
                         });
@@ -404,6 +489,18 @@ public abstract class GameStage extends Stage {
                                     && session.clientLobby.getLocalPlayer() == slot;
                             if (isMe) {
                                 session.mySlotIndex = slot;
+                                // WorldStage.enter() skipped PLAYER_STATE because mySlotIndex
+                                // was -1 at that time (pending events not yet processed).
+                                // Now that we know our slot, send the full state with deck.
+                                if (session.client != null) {
+                                    try {
+                                        session.client.send(new AdventureNetEvent(
+                                                AdventureNetEvent.Type.PLAYER_STATE,
+                                                buildClientPlayerStatePayload(slot)));
+                                    } catch (final Exception ex) {
+                                        System.err.println("[AdventureMP] Failed to send PLAYER_STATE: " + ex.getMessage());
+                                    }
+                                }
                                 break; // don't create a sprite for ourselves
                             }
                             final String[] state = session.remotePlayerStates.get(slot);
@@ -426,9 +523,35 @@ public abstract class GameStage extends Stage {
                         forge.adventure.scene.DuelScene.instance().enterAsNetworkClient(event.payload);
                     });
                     break;
-                case BATTLE_END:
-                    Gdx.app.postRunnable(() -> self.resumeAfterBattle());
+                case BATTLE_END: {
+                    // Payload is String[] where [0]="true"/"false" (winner) and [1..] are
+                    // serialized reward descriptors generated by the host.  The old Boolean
+                    // payload is accepted as a legacy fallback (no rewards in that case).
+                    final String[] battlePayload = (event.payload instanceof String[])
+                            ? (String[]) event.payload : null;
+                    final boolean humanWon = battlePayload != null
+                            ? Boolean.parseBoolean(battlePayload[0])
+                            : Boolean.TRUE.equals(event.payload);
+                    Gdx.app.postRunnable(() -> {
+                        self.resumeAfterBattle();
+                        if (humanWon) {
+                            // Increment win counter unconditionally — rewards are optional.
+                            Current.player().win();
+                            if (battlePayload != null && battlePayload.length > 1) {
+                                final Array<Reward> rewards = new Array<>();
+                                for (int i = 1; i < battlePayload.length; i++) {
+                                    final Reward r = DuelScene.deserializeReward(battlePayload[i]);
+                                    if (r != null) rewards.add(r);
+                                }
+                                // Hand rewards to DuelScene — it will show RewardScene
+                                // either immediately (if GameEnd hasn't fired yet) or
+                                // via a fallback postRunnable (if GameEnd already ran).
+                                DuelScene.instance().setPendingClientRewards(rewards);
+                            }
+                        }
+                    });
                     break;
+                }
                 case PLAYER_ENTER_POI:
                     // Host entered a POI: their subsequent PLAYER_MOVE packets carry local
                     // map coordinates, not world coordinates. Freeze the world-map sprite so
@@ -449,6 +572,21 @@ public abstract class GameStage extends Stage {
                             session.remotePlayerStates.put(slotIdx, new String[]{ spriteName, hp });
                             Gdx.app.postRunnable(() -> self.applyRemotePlayerSprite(slotIdx, spriteName));
                         }
+                    }
+                    break;
+                case EVENT_INIT:
+                    if (event.payload instanceof forge.adventure.data.AdventureEventData) {
+                        final forge.adventure.data.AdventureEventData remoteEvent =
+                                (forge.adventure.data.AdventureEventData) event.payload;
+                        session.activeEventData = remoteEvent;
+                        session.activeEventDeck = null; // reset until client commits a drafted deck
+                        Gdx.app.postRunnable(() -> {
+                            // Open the same EventScene as the host with the deserialized event.
+                            // Status arrives as Entered (host paid the entry fee) so we go straight
+                            // to the draft / deck-build UI; no entry-fee dialog on the client side.
+                            Forge.switchScene(forge.adventure.scene.EventScene.instance(
+                                    forge.adventure.scene.GameScene.instance(), remoteEvent, null));
+                        });
                     }
                     break;
                 default:
@@ -822,14 +960,27 @@ public abstract class GameStage extends Stage {
             if (session.isActiveClient() && session.clientLobby != null) {
                 // Force re-registration so registerClientListener() captures `this` stage.
                 session.clientLobby.clearEventListener();
-                // Recreate sprites for players we already know about (stage transition).
+                // Spawn remote sprites at our own player position rather than (0, 0).  In a dungeon
+                // (0, 0) is the bottom-left corner of the tile map and is usually off-screen, so a
+                // newly-created remote sprite stayed invisible until PLAYER_MOVE lerped it inward.
+                // Spawning at our position keeps the sprite on-screen immediately; the next
+                // PLAYER_MOVE packet will move it to the actual remote location.
+                final float spawnX = (player != null) ? player.pos().x : 0f;
+                final float spawnY = (player != null) ? player.pos().y : 0f;
+                System.out.println("[AdventureMP] client " + getClass().getSimpleName()
+                        + ".enter: remotePlayerNames=" + session.remotePlayerNames
+                        + " mySlot=" + session.mySlotIndex
+                        + " slotsInPoi=" + session.slotsInPoi
+                        + " spawn=(" + spawnX + "," + spawnY + ")");
                 for (final Entry<Integer, String> entry : session.remotePlayerNames.entrySet()) {
                     final int slot = entry.getKey();
                     if (slot == session.mySlotIndex) continue;
                     final String[] state = session.remotePlayerStates.get(slot);
                     final String spritePath = (state != null && state.length > 0)
                             ? state[0] : Current.player().spriteName();
-                    addRemotePlayer(slot, entry.getValue(), spritePath, 0f, 0f);
+                    System.out.println("[AdventureMP] client adding remote sprite slot=" + slot
+                            + " name=" + entry.getValue() + " sprite=" + spritePath);
+                    addRemotePlayer(slot, entry.getValue(), spritePath, spawnX, spawnY);
                 }
             } else if (session.isActiveHost() && session.serverLobby != null) {
                 // Recreate sprites for all currently connected remote clients.
@@ -868,6 +1019,20 @@ public abstract class GameStage extends Stage {
                 };
                 session.onRemotePlayerStateCallback = (slotIndex, spriteName) ->
                         Gdx.app.postRunnable(() -> self.applyRemotePlayerSprite(slotIndex, spriteName));
+                // BATTLE_REQUEST: a client asked us to start a co-op battle.  Run the host's
+                // beginDuel path on the GDX thread so it broadcasts BATTLE_INIT to everyone.
+                // We synthesize a transient EnemySprite from the EnemyData payload — it's only
+                // used to satisfy the existing beginDuel signature and feeds DuelScene.initDuels.
+                session.onBattleRequestCallback = (payload) -> {
+                    if (!(payload instanceof forge.adventure.data.EnemyData)) return;
+                    final forge.adventure.data.EnemyData enemyData =
+                            (forge.adventure.data.EnemyData) payload;
+                    Gdx.app.postRunnable(() -> {
+                        final forge.adventure.character.EnemySprite mob =
+                                new forge.adventure.character.EnemySprite(enemyData);
+                        MapStage.getInstance().beginDuel(mob);
+                    });
+                };
             }
         }
 

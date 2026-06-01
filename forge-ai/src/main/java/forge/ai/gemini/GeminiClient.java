@@ -7,6 +7,8 @@ import org.tinylog.Logger;
 
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -16,43 +18,85 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 
 public class GeminiClient {
-    private static final String DEFAULT_MODEL = "gemini-3.1-flash-lite";
+    private static final String DEFAULT_MODEL = "gemini-2.0-flash-lite";
     private static final String DEFAULT_LOCATION = "us-central1";
-    private static final String ENDPOINT_TEMPLATE =
-        "https://aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:generateContent";
 
+    private static final String GEMINI_ENDPOINT =
+        "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s";
+
+    private final boolean useVertex;
+    private final boolean isMaas;   // true for MaaS (OpenAI-compat) models
+    private final String maasModelId; // e.g. "zai-org/glm-4.7-maas"
     private final String apiKey;
     private final String endpoint;
     private final HttpClient http;
 
     public GeminiClient() {
-        this.apiKey = System.getenv("GEMINI_API_KEY");
-
-        String projectId = System.getProperty("forge.gemini.projectId");
-        if (projectId == null || projectId.isEmpty()) {
-            projectId = System.getenv("GEMINI_PROJECT_ID");
-        }
-        if (projectId == null || projectId.isEmpty()) {
-            projectId = "gen-lang-client-0610286057";
-        }
-
-        String location = System.getenv("GEMINI_LOCATION");
-        if (location == null || location.isEmpty()) {
-            location = DEFAULT_LOCATION;
-        }
-
         String model = System.getProperty("forge.gemini.model");
-        if (model == null || model.isEmpty()) {
-            model = System.getenv("GEMINI_MODEL");
-        }
-        if (model == null || model.isEmpty()) {
-            model = DEFAULT_MODEL;
+        if (model == null || model.isEmpty()) model = System.getenv("GEMINI_MODEL");
+        if (model == null || model.isEmpty()) model = DEFAULT_MODEL;
+
+        useVertex = Boolean.parseBoolean(System.getProperty("forge.gemini.useVertex", "false"));
+        isMaas = useVertex && model.endsWith("-maas");
+        maasModelId = isMaas ? maasModelId(model) : null;
+
+        String key = System.getenv("GEMINI_API_KEY");
+        this.apiKey = key;
+
+        if (useVertex) {
+            String project = System.getProperty("forge.gemini.vertexProject");
+            if (project == null || project.isEmpty()) project = System.getenv("VERTEX_PROJECT");
+            if (project == null || project.isEmpty()) project = System.getenv("GEMINI_PROJECT_ID");
+            if (project == null || project.isEmpty()) project = "gen-lang-client-0610286057";
+
+            String location = System.getProperty("forge.gemini.vertexLocation");
+            if (location == null || location.isEmpty()) location = System.getenv("VERTEX_LOCATION");
+            if (location == null || location.isEmpty()) location = DEFAULT_LOCATION;
+
+            // "global" uses no host prefix; "eu" uses "eu-"; all others use "{location}-"
+            String hostPrefix;
+            switch (location) {
+                case "global": hostPrefix = ""; break;
+                case "eu":     hostPrefix = "eu-"; break;
+                default:       hostPrefix = location + "-"; break;
+            }
+            String host = "https://" + hostPrefix + "aiplatform.googleapis.com";
+
+            if (isMaas) {
+                // MaaS models (non-Gemini) use the OpenAI-compatible chat completions endpoint
+                this.endpoint = host + String.format(
+                    "/v1/projects/%s/locations/%s/endpoints/openapi/chat/completions",
+                    project, location);
+            } else {
+                this.endpoint = host + String.format(
+                    "/v1/projects/%s/locations/%s/publishers/google/models/%s:generateContent",
+                    project, location, model);
+            }
+        } else {
+            this.endpoint = String.format(GEMINI_ENDPOINT, model, key != null ? key : "");
         }
 
-        this.endpoint = String.format(ENDPOINT_TEMPLATE, projectId, location, model);
         this.http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(10))
             .build();
+    }
+
+    /**
+     * Maps the display model name used in settings to the API model ID required by the
+     * MaaS OpenAI-compatible endpoint (org-prefix + canonical dot-version name).
+     */
+    private static String maasModelId(String model) {
+        switch (model) {
+            case "glm-4-7-maas": return "zai-org/glm-4.7-maas";
+            case "glm-5-maas":   return "zai-org/glm-5-maas";
+            default:
+                if (model.startsWith("glm-"))       return "zai-org/" + model;
+                if (model.startsWith("deepseek-"))  return "deepseek/" + model;
+                if (model.startsWith("qwen"))       return "qwen/" + model;
+                if (model.startsWith("minimax-"))   return "minimax/" + model;
+                if (model.startsWith("gpt-oss-"))   return "microsoft/" + model;
+                return model;
+        }
     }
 
     private static final int MAX_RETRIES = 3;
@@ -71,26 +115,64 @@ public class GeminiClient {
         }
     }
 
+    private String getVertexBearerToken() {
+        String token = System.getenv("VERTEX_ACCESS_TOKEN");
+        if (token != null && !token.isEmpty()) return token;
+
+        try {
+            Process proc = new ProcessBuilder("gcloud", "auth", "print-access-token")
+                .redirectErrorStream(true)
+                .start();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(proc.getInputStream()))) {
+                String line = reader.readLine();
+                if (line != null && !line.isEmpty() && !line.contains("ERROR")) {
+                    return line.trim();
+                }
+            }
+        } catch (IOException e) {
+            Logger.warn("Could not get Vertex access token via gcloud: {}", e.getMessage());
+        }
+        return null;
+    }
+
     public JsonObject ask(String systemPrompt, String userJson) throws Exception {
-        if (apiKey == null || apiKey.isEmpty()) {
+        if (!useVertex && (apiKey == null || apiKey.isEmpty())) {
             throw new IllegalStateException("GEMINI_API_KEY environment variable not set");
         }
 
         log("REQUEST", userJson);
 
-        String requestBody = buildRequestBody(systemPrompt, userJson);
-        HttpRequest request = HttpRequest.newBuilder()
+        String requestBody = isMaas
+            ? buildMaasRequestBody(systemPrompt, userJson)
+            : buildGeminiRequestBody(systemPrompt, userJson);
+
+        HttpRequest.Builder reqBuilder = HttpRequest.newBuilder()
             .uri(URI.create(endpoint))
             .header("Content-Type", "application/json")
-            .header("x-goog-api-key", apiKey)
             .POST(HttpRequest.BodyPublishers.ofString(requestBody))
-            .timeout(Duration.ofSeconds(30))
-            .build();
+            .timeout(Duration.ofSeconds(30));
+
+        if (useVertex) {
+            if (apiKey != null && !apiKey.isEmpty()) {
+                reqBuilder.header("x-goog-api-key", apiKey);
+            } else {
+                String token = getVertexBearerToken();
+                if (token != null) {
+                    reqBuilder.header("Authorization", "Bearer " + token);
+                } else {
+                    throw new IllegalStateException("No Vertex AI credentials. Set GEMINI_API_KEY (Agent Platform API key) or VERTEX_ACCESS_TOKEN.");
+                }
+            }
+        }
+
+        HttpRequest request = reqBuilder.build();
 
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() == 200) {
-                JsonObject result = extractJsonResponse(response.body());
+                JsonObject result = isMaas
+                    ? extractMaasJsonResponse(response.body())
+                    : extractGeminiJsonResponse(response.body());
                 log("RESPONSE", result.toString());
                 return result;
             }
@@ -105,7 +187,9 @@ public class GeminiClient {
         throw new RuntimeException("Gemini API error: failed after " + MAX_RETRIES + " retries");
     }
 
-    private String buildRequestBody(String systemPrompt, String userJson) {
+    // --- Gemini generateContent format ---
+
+    private String buildGeminiRequestBody(String systemPrompt, String userJson) {
         JsonObject body = new JsonObject();
 
         JsonObject sysInstruction = new JsonObject();
@@ -134,7 +218,7 @@ public class GeminiClient {
         return body.toString();
     }
 
-    private JsonObject extractJsonResponse(String responseBody) {
+    private JsonObject extractGeminiJsonResponse(String responseBody) {
         JsonObject response = JsonParser.parseString(responseBody).getAsJsonObject();
         String text = response
             .getAsJsonArray("candidates")
@@ -143,6 +227,44 @@ public class GeminiClient {
             .getAsJsonArray("parts")
             .get(0).getAsJsonObject()
             .get("text").getAsString();
+        return JsonParser.parseString(text).getAsJsonObject();
+    }
+
+    // --- MaaS OpenAI-compatible chat completions format ---
+
+    private String buildMaasRequestBody(String systemPrompt, String userJson) {
+        JsonObject body = new JsonObject();
+        body.addProperty("model", maasModelId);
+        body.addProperty("stream", false);
+
+        JsonArray messages = new JsonArray();
+
+        JsonObject sysMsg = new JsonObject();
+        sysMsg.addProperty("role", "system");
+        sysMsg.addProperty("content", systemPrompt);
+        messages.add(sysMsg);
+
+        JsonObject userMsg = new JsonObject();
+        userMsg.addProperty("role", "user");
+        userMsg.addProperty("content", userJson);
+        messages.add(userMsg);
+
+        body.add("messages", messages);
+
+        JsonObject responseFormat = new JsonObject();
+        responseFormat.addProperty("type", "json_object");
+        body.add("response_format", responseFormat);
+
+        return body.toString();
+    }
+
+    private JsonObject extractMaasJsonResponse(String responseBody) {
+        JsonObject response = JsonParser.parseString(responseBody).getAsJsonObject();
+        String text = response
+            .getAsJsonArray("choices")
+            .get(0).getAsJsonObject()
+            .getAsJsonObject("message")
+            .get("content").getAsString();
         return JsonParser.parseString(text).getAsJsonObject();
     }
 }

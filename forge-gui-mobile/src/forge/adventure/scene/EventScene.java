@@ -127,14 +127,17 @@ public class EventScene extends MenuScene implements IAfterMatch {
 
         enterWithCoin.callback = (result) -> {
             currentEvent.eventStatus = AdventureEventController.EventStatus.Entered;
+            broadcastEventInitIfHost();
             refresh();
         };
         enterWithShards.callback = (result) -> {
             currentEvent.eventStatus = AdventureEventController.EventStatus.Entered;
+            broadcastEventInitIfHost();
             refresh();
         };
         enterWithGold.callback = (result) -> {
             currentEvent.eventStatus = AdventureEventController.EventStatus.Entered;
+            broadcastEventInitIfHost();
             refresh();
         };
 
@@ -347,14 +350,24 @@ public class EventScene extends MenuScene implements IAfterMatch {
                 editDeck.setVisible(true);
                 nextPage.setDisabled(false);
                 previousPage.setDisabled(false);
+                publishMultiplayerReadyState();
                 break;
             case Started:
-                advance.setText("Play round " + currentEvent.currentRound);
+                if (forge.gamemodes.net.adventure.AdventureNetSession.getInstance().isActiveClient()) {
+                    // Client doesn't drive round progression — the host's "Play round N" click
+                    // broadcasts BATTLE_INIT which pulls this client into the same co-op match.
+                    advance.setText("Waiting for host...");
+                    advance.setDisabled(true);
+                } else {
+                    advance.setText("Play round " + currentEvent.currentRound);
+                    advance.setDisabled(false);
+                }
                 advance.setVisible(true);
                 editDeck.setDisabled(false);
                 editDeck.setVisible(true);
                 nextPage.setDisabled(false);
                 previousPage.setDisabled(false);
+                publishMultiplayerReadyState();
                 break;
             case Completed:
                 advance.setText("Collect Rewards");
@@ -386,6 +399,51 @@ public class EventScene extends MenuScene implements IAfterMatch {
         if (lastGameScene != null)
             object.lastGameScene = lastGameScene;
         return object;
+    }
+
+    /**
+     * Client-side: publish the just-finalized event deck so the host can use it when building
+     * this slot's RegisteredPlayer at match start, and signal EVENT_READY so the host knows
+     * this client has committed.  No-op on host or when the deck isn't ready yet.
+     *
+     * Idempotent — refresh() can fire many times; the host treats repeats as set inserts.
+     */
+    private static void publishMultiplayerReadyState() {
+        final forge.gamemodes.net.adventure.AdventureNetSession session =
+                forge.gamemodes.net.adventure.AdventureNetSession.getInstance();
+        if (currentEvent == null || currentEvent.registeredDeck == null) return;
+        // Always update the event-deck override (used by buildClientPlayerStatePayload).
+        session.activeEventDeck = currentEvent.registeredDeck;
+        if (!session.isActiveClient() || session.client == null || session.mySlotIndex < 0) return;
+        // Resend PLAYER_STATE so the host's cached state reflects the drafted deck before
+        // the host's BATTLE_INIT triggers DuelScene.enter() and reads getPlayerState(slot).
+        try {
+            session.client.send(new forge.gamemodes.net.adventure.AdventureNetEvent(
+                    forge.gamemodes.net.adventure.AdventureNetEvent.Type.PLAYER_STATE,
+                    forge.adventure.stage.GameStage.buildClientPlayerStatePayload(session.mySlotIndex)));
+        } catch (final Exception ignored) { }
+        try {
+            session.client.send(new forge.gamemodes.net.adventure.AdventureNetEvent(
+                    forge.gamemodes.net.adventure.AdventureNetEvent.Type.EVENT_READY,
+                    Integer.valueOf(session.mySlotIndex)));
+        } catch (final Exception ignored) { }
+    }
+
+    /**
+     * Broadcasts EVENT_INIT so connected adventure clients open the same EventScene with
+     * a deserialized copy of {@code currentEvent}.  No-op outside multiplayer host context.
+     * Each client recreates the same draft/sealed pool locally from the shared event seed.
+     */
+    private static void broadcastEventInitIfHost() {
+        final forge.gamemodes.net.adventure.AdventureNetSession session =
+                forge.gamemodes.net.adventure.AdventureNetSession.getInstance();
+        if (!session.isActiveHost() || currentEvent == null) return;
+        session.activeEventData = currentEvent;
+        session.eventReadyClients.clear();
+        forge.gamemodes.net.server.FServerManager.getInstance().broadcast(
+                new forge.gamemodes.net.adventure.AdventureNetEvent(
+                        forge.gamemodes.net.adventure.AdventureNetEvent.Type.EVENT_INIT,
+                        currentEvent));
     }
 
     private void nextPage(boolean reverse) {
@@ -486,6 +544,12 @@ public class EventScene extends MenuScene implements IAfterMatch {
     }
 
     public void startRound() {
+        // Multiplayer client: host owns round timing; ignore local triggers entirely
+        // (BATTLE_INIT from the host will pull this client into the co-op match).
+        if (forge.gamemodes.net.adventure.AdventureNetSession.getInstance().isActiveClient()) {
+            advance.setDisabled(true);
+            return;
+        }
         for (AdventureEventData.AdventureEventMatch match : currentEvent.getMatches(currentEvent.currentRound)) {
             match.round = currentEvent.currentRound;
             if (match.winner != null) continue;
@@ -524,6 +588,21 @@ public class EventScene extends MenuScene implements IAfterMatch {
             EnemySprite enemy = humanMatch.p2.getSprite();
             currentEvent.nextOpponent = humanMatch.p2;
             advance.setDisabled(true);
+            // Multiplayer host: gate on every connected client having sent EVENT_READY for the
+            // current event, then mirror MapStage.beginDuel() by broadcasting BATTLE_INIT so all
+            // clients enter the same co-op match.  Their drafted decks come in via PLAYER_STATE
+            // (activeEventDeck override) ahead of the host's DuelScene.enter() reading them.
+            final forge.gamemodes.net.adventure.AdventureNetSession netSession =
+                    forge.gamemodes.net.adventure.AdventureNetSession.getInstance();
+            if (netSession.isActiveHost()) {
+                if (!allRemoteClientsEventReady(netSession)) {
+                    showWaitingForClientsDialog();
+                    advance.setDisabled(false);
+                    return;
+                }
+                netSession.serverLobby.initiateBattle(enemy.getData(),
+                        WorldStage.getInstance().collectPlayerPositions());
+            }
             FThreads.invokeInEdtNowOrLater(() -> Forge.setTransitionScreen(new TransitionScreen(() -> {
                 duelScene.initDuels(WorldStage.getInstance().getPlayerSprite(), enemy, false, currentEvent);
                 advance.setDisabled(false);
@@ -533,6 +612,32 @@ public class EventScene extends MenuScene implements IAfterMatch {
             finishRound();
             advance.setDisabled(false);
         }
+    }
+
+    /**
+     * Host-side: returns true if every connected remote client has sent EVENT_READY for the
+     * active event.  Used to gate startRound() so a still-drafting client doesn't get dragged
+     * into a match with an empty/stale deck.
+     */
+    private static boolean allRemoteClientsEventReady(
+            final forge.gamemodes.net.adventure.AdventureNetSession session) {
+        if (session.serverLobby == null) return true;
+        for (int i = 1; i < session.serverLobby.getNumberOfSlots(); i++) {
+            final forge.gamemodes.match.LobbySlot slot = session.serverLobby.getSlot(i);
+            if (slot == null) continue;
+            if (slot.getType() != forge.gamemodes.match.LobbySlotType.REMOTE) continue;
+            if (!session.eventReadyClients.contains(i)) return false;
+        }
+        return true;
+    }
+
+    private void showWaitingForClientsDialog() {
+        DialogData wait = new DialogData();
+        wait.text = "Waiting for other players to finish building their decks.";
+        DialogData ok = new DialogData();
+        ok.locname = "lblOK";
+        wait.options = new DialogData[]{ ok };
+        loadDialog(wait);
     }
 
     public void setWinner(boolean winner, boolean isArena) {

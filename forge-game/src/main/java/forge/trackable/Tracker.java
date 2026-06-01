@@ -41,14 +41,22 @@ public class Tracker {
     }
 
     public void unfreeze() {
-        if (!isFrozen() || --freezeCounter > 0 || delayedPropChanges.isEmpty()) {
+        if (!isFrozen() || --freezeCounter > 0) {
             return;
         }
+        // Drain the queue under lock so concurrent addDelayedPropChange / getDelayedPropsFor
+        // calls from other threads (e.g. DeltaSyncManager on the EDT) can't see a half-modified
+        // list or trigger ConcurrentModificationException during multiplayer match progression.
+        final DelayedPropChange[] drained;
+        synchronized (delayedPropChanges) {
+            if (delayedPropChanges.isEmpty()) return;
+            drained = delayedPropChanges.toArray(new DelayedPropChange[0]);
+            delayedPropChanges.clear();
+        }
         //after being unfrozen, ensure all changes delayed during freeze are now applied
-        for (final DelayedPropChange change : delayedPropChanges) {
+        for (final DelayedPropChange change : drained) {
             change.object.set(change.prop, change.value);
         }
-        delayedPropChanges.clear();
     }
 
     public void flush() {
@@ -61,22 +69,31 @@ public class Tracker {
     }
 
     public void addDelayedPropChange(final TrackableObject object, final TrackableProperty prop, final Object value) {
-        delayedPropChanges.add(new DelayedPropChange(object, prop, value));
+        synchronized (delayedPropChanges) {
+            delayedPropChanges.add(new DelayedPropChange(object, prop, value));
+        }
     }
 
     public void clearDelayed() {
-        delayedPropChanges.clear();
+        synchronized (delayedPropChanges) {
+            delayedPropChanges.clear();
+        }
     }
 
     /**
      * Read-only peek at delayed property changes queued for a specific object.
+     * Takes a snapshot under lock to stay safe against concurrent add/clear from the game thread.
      */
     public Map<TrackableProperty, Object> getDelayedPropsFor(TrackableObject obj) {
-        if (delayedPropChanges.isEmpty()) {
-            return Collections.emptyMap();
+        final DelayedPropChange[] snapshot;
+        synchronized (delayedPropChanges) {
+            if (delayedPropChanges.isEmpty()) {
+                return Collections.emptyMap();
+            }
+            snapshot = delayedPropChanges.toArray(new DelayedPropChange[0]);
         }
         Map<TrackableProperty, Object> result = new EnumMap<>(TrackableProperty.class);
-        for (DelayedPropChange change : delayedPropChanges) {
+        for (DelayedPropChange change : snapshot) {
             if (change.object == obj) {
                 result.put(change.prop, change.value);
             }

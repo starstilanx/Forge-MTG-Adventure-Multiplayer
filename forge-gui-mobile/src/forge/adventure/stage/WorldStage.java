@@ -439,17 +439,18 @@ public class WorldStage extends GameStage implements SaveFileContent {
             // Broadcast host sprite/HP so clients can render the correct art immediately.
             netSession.serverLobby.broadcastHostState(hostPlayer.spriteName(),
                     String.valueOf(hostPlayer.getLife()));
-        } else if (netSession.isActiveClient() && netSession.client != null) {
-            // Send our player state (sprite, HP, deck) to the host so it can render us correctly
-            // and use our deck + HP when setting up battles.
-            final forge.adventure.player.AdventurePlayer p = WorldSave.getCurrentSave().getPlayer();
-            final forge.deck.Deck deck = p.getSelectedDeck();
-            final String deckStr = deck != null ? deck.getMain().toCardList("\n") : "";
+        } else if (netSession.isActiveClient() && netSession.client != null
+                && netSession.mySlotIndex >= 0) {
+            // Must send the full 10-field payload (slot, sprite, hp, deck, commander,
+            // lifeMod, handMod, shards, bfCards, cmdCards).  A shorter payload would
+            // overwrite the cached state on the server, causing the host to start the
+            // next battle without this client's commander or gear effects.
+            // mySlotIndex may still be -1 here if the pending PLAYER_JOIN hasn't been
+            // processed yet; in that case we skip — the PLAYER_JOIN handler will send it.
             try {
                 netSession.client.send(new AdventureNetEvent(
                         AdventureNetEvent.Type.PLAYER_STATE,
-                        new String[]{ p.getName(), p.spriteName(),
-                                String.valueOf(p.getLife()), deckStr }));
+                        GameStage.buildClientPlayerStatePayload(netSession.mySlotIndex)));
             } catch (final Exception e) {
                 System.err.println("[AdventureMP] Failed to send PLAYER_STATE: " + e.getMessage());
             }

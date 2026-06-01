@@ -43,6 +43,25 @@ public class AdventureNetEvent implements NetEvent {
         PLAYER_ENTER_POI,
         /** Server → All. No payload — host returned to the world map; clients should follow. */
         PLAYER_EXIT_POI,
+        /**
+         * Client → Server. Payload: EnemyData (Serializable).
+         * Client has collided with an enemy and wants to start a co-op battle.  The host
+         * receives this, calls its own initiateBattle() flow which broadcasts BATTLE_INIT
+         * to everyone (including the requester) so all players enter the same DuelScene.
+         */
+        BATTLE_REQUEST,
+        /**
+         * Server → All. Payload: AdventureEventData (Serializable).
+         * Host has entered an event; clients should open the same EventScene with this data so they
+         * can draft / build decks locally against the shared seed.
+         */
+        EVENT_INIT,
+        /**
+         * Client → Server. Payload: Integer slotIndex.
+         * Client has finalized its event deck and is ready to start matches.
+         * Host tracks ready clients and gates startRound() on all being ready.
+         */
+        EVENT_READY,
     }
 
     public final Type type;

@@ -115,7 +115,16 @@ public class ViewWinLose extends FOverlay implements IWinLoseView<FButton> {
             break;
         }
         if (control == null) {
-            control = new ControlWinLose(this, game0);
+            // Inside Adventure mode the GameType may be Commander, Constructed, etc. —
+            // those would otherwise pick the default ControlWinLose, whose "Quit" does
+            // not call DuelScene.GameEnd().  Without GameEnd(), the host never broadcasts
+            // BATTLE_END (so the client never gets reward data) and the client never sets
+            // networkClientExited (so any late-arriving rewards have no path to RewardScene).
+            if (Forge.isMobileAdventureMode) {
+                control = new AdventureWinLose(this, game0);
+            } else {
+                control = new ControlWinLose(this, game0);
+            }
         }
 
         showGameOutcomeSummary();

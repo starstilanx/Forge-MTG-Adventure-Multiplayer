@@ -167,6 +167,19 @@ public final class FServerManager implements IHasForgeLog {
                                             } else if (event.type == forge.gamemodes.net.adventure.AdventureNetEvent.Type.PLAYER_STATE
                                                     && event.payload instanceof String[]) {
                                                 session.serverLobby.onClientPlayerState((String[]) event.payload);
+                                            } else if (event.type == forge.gamemodes.net.adventure.AdventureNetEvent.Type.EVENT_READY
+                                                    && event.payload instanceof Integer) {
+                                                session.eventReadyClients.add((Integer) event.payload);
+                                            } else if (event.type == forge.gamemodes.net.adventure.AdventureNetEvent.Type.BATTLE_REQUEST
+                                                    && event.payload != null) {
+                                                // Client wants to start a co-op battle.  Pull the host's MapStage into beginDuel
+                                                // on the GDX thread so the host runs the same flow they'd run on a host-initiated
+                                                // collision — that path calls serverLobby.initiateBattle() which broadcasts
+                                                // BATTLE_INIT to everyone (including the requester).
+                                                final java.io.Serializable enemyPayload = event.payload;
+                                                final java.util.function.Consumer<java.io.Serializable> cb =
+                                                        session.onBattleRequestCallback;
+                                                if (cb != null) cb.accept(enemyPayload);
                                             }
                                         }
                                     }),

@@ -1117,6 +1117,19 @@ public class Forge implements ApplicationListener {
         return null;
     }
 
+    /**
+     * Trim Dscreens to only the current FScreen. Called by adventure ForgeScenes
+     * (e.g. ShopScene) that are entered via Forge.switchScene() so that pressing
+     * back empties Dscreens → setCurrentScreen(null) → switchToLast() rather than
+     * restoring a stale FScreen (e.g. the multiplayer lobby).
+     */
+    public static void retainOnlyCurrentScreen() {
+        if (currentScreen != null) {
+            Dscreens.clear();
+            Dscreens.addFirst(currentScreen);
+        }
+    }
+
     public static void startKeyInput(KeyInputAdapter adapter) {
         if (keyInputAdapter == adapter) {
             return;

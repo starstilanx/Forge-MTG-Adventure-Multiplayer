@@ -27,6 +27,9 @@ public class ServerAdventureLobby extends GameLobby {
     private final float[] allPositions = new float[8];
     private java.util.Timer heartbeatTimer;
 
+    /** Hard cap on simultaneous players (1 host + 3 clients). */
+    private static final int MAX_PLAYERS = 4;
+
     public ServerAdventureLobby() {
         super(true);
         addSlot(new LobbySlot(LobbySlotType.LOCAL,
@@ -46,34 +49,53 @@ public class ServerAdventureLobby extends GameLobby {
 
     public synchronized int connectPlayer(final String name, final int avatarIndex, final int sleeveIndex) {
         System.out.println("[AdventureMP] connectPlayer(" + name + ") slots before=" + getNumberOfSlots());
+        // First try to claim an existing OPEN slot; if none, append a fresh OPEN slot (so the
+        // 2nd, 3rd, and 4th clients each get a unique slot index without forcing the lobby UI
+        // to display 3 empty player panels at startup).  Capped at MAX_PLAYERS.
+        int index = findOpenSlot();
+        if (index < 0) {
+            if (getNumberOfSlots() >= MAX_PLAYERS) {
+                System.err.println("[AdventureMP] connectPlayer(" + name + ") — lobby full ("
+                        + getNumberOfSlots() + " slots), rejecting");
+                return -1;
+            }
+            index = getNumberOfSlots();
+            addSlot(new LobbySlot(LobbySlotType.OPEN, null, -1, -1,
+                    1, false, false, Collections.emptySet()));
+        }
+        final LobbySlot slot = getSlot(index);
+        slot.setType(LobbySlotType.REMOTE);
+        slot.setName(name);
+        slot.setAvatarIndex(avatarIndex);
+        slot.setSleeveIndex(sleeveIndex);
+
+        updateView(false);
+
+        // Notify existing players that a new player joined
+        final float spawnX = allPositions[0];
+        final float spawnY = allPositions[1];
+        FServerManager.getInstance().broadcast(new AdventureNetEvent(
+                AdventureNetEvent.Type.PLAYER_JOIN,
+                new String[]{ String.valueOf(index), name, String.valueOf(spawnX), String.valueOf(spawnY) }));
+
+        final forge.gamemodes.net.adventure.AdventureNetSession session =
+                forge.gamemodes.net.adventure.AdventureNetSession.getInstance();
+        if (session.onPlayerJoinCallback != null) {
+            session.onPlayerJoinCallback.accept(index);
+        }
+        System.out.println("[AdventureMP] connectPlayer(" + name + ") assigned slot=" + index
+                + " slots after=" + getNumberOfSlots());
+        return index;
+    }
+
+    private int findOpenSlot() {
         final int nSlots = getNumberOfSlots();
-        for (int index = 0; index < nSlots; index++) {
-            final LobbySlot slot = getSlot(index);
-            if (slot.getType() == LobbySlotType.OPEN) {
-                slot.setType(LobbySlotType.REMOTE);
-                slot.setName(name);
-                slot.setAvatarIndex(avatarIndex);
-                slot.setSleeveIndex(sleeveIndex);
-
-                updateView(false);
-
-                // Notify existing players that a new player joined
-                final float spawnX = allPositions[0];
-                final float spawnY = allPositions[1];
-                FServerManager.getInstance().broadcast(new AdventureNetEvent(
-                        AdventureNetEvent.Type.PLAYER_JOIN,
-                        new String[]{ String.valueOf(index), name, String.valueOf(spawnX), String.valueOf(spawnY) }));
-
-                final forge.gamemodes.net.adventure.AdventureNetSession session =
-                        forge.gamemodes.net.adventure.AdventureNetSession.getInstance();
-                if (session.onPlayerJoinCallback != null) {
-                    session.onPlayerJoinCallback.accept(index);
-                }
-                System.out.println("[AdventureMP] connectPlayer(" + name + ") assigned slot=" + index + " slots after=" + getNumberOfSlots());
-                return index;
+        for (int i = 0; i < nSlots; i++) {
+            final LobbySlot slot = getSlot(i);
+            if (slot != null && slot.getType() == LobbySlotType.OPEN) {
+                return i;
             }
         }
-        System.err.println("[AdventureMP] connectPlayer(" + name + ") — no open slot found, slots=" + getNumberOfSlots());
         return -1;
     }
 
@@ -179,16 +201,16 @@ public class ServerAdventureLobby extends GameLobby {
 
     public void onClientPlayerState(final String[] data) {
         if (data == null || data.length < 3) return;
-        final String name = data[0];
-        int slotIndex = -1;
-        for (int i = 0; i < getNumberOfSlots(); i++) {
-            final LobbySlot s = getSlot(i);
-            if (s != null && name.equals(s.getName())) {
-                slotIndex = i;
-                break;
-            }
+        // data[0] is the client's assigned slot index as a string (e.g. "1").
+        // Using slot index avoids a mismatch between the Adventure character name
+        // and the Forge network username that was used to register the lobby slot.
+        int slotIndex;
+        try {
+            slotIndex = Integer.parseInt(data[0]);
+        } catch (final NumberFormatException ignored) {
+            return;
         }
-        if (slotIndex < 0) return;
+        if (slotIndex < 1 || slotIndex >= getNumberOfSlots()) return;
         playerStates.put(slotIndex, data);
         // Populate session map so the host's GameStage can look up remote sprites correctly.
         final forge.gamemodes.net.adventure.AdventureNetSession session =
@@ -236,9 +258,19 @@ public class ServerAdventureLobby extends GameLobby {
                 new AdventureNetEvent(AdventureNetEvent.Type.BATTLE_INIT, enemyDataPayload));
     }
 
-    public void onBattleEnd(final boolean humansWon) {
+    /**
+     * Broadcast battle result to all clients.
+     * @param humansWon     whether the human team won
+     * @param rewardStrings reward descriptions serialized by DuelScene.serializeReward(), or null
+     */
+    public void onBattleEnd(final boolean humansWon, final String[] rewardStrings) {
+        // Payload: String[] where [0]="true"/"false", [1..]=reward descriptors.
+        final int rewardCount = (humansWon && rewardStrings != null) ? rewardStrings.length : 0;
+        final String[] payload = new String[1 + rewardCount];
+        payload[0] = String.valueOf(humansWon);
+        if (rewardCount > 0) System.arraycopy(rewardStrings, 0, payload, 1, rewardCount);
         FServerManager.getInstance().broadcast(
-                new AdventureNetEvent(AdventureNetEvent.Type.BATTLE_END, humansWon));
+                new AdventureNetEvent(AdventureNetEvent.Type.BATTLE_END, payload));
     }
 
     public void broadcastPoiEntry(final String poiId) {
