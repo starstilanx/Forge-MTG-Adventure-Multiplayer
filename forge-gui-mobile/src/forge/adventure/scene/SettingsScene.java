@@ -283,6 +283,7 @@ public class SettingsScene extends UIScene {
                 Config.instance().saveSettings();
             }
         });
+        // --- Gemini AI settings ---
         addSettingField("Use Gemini AI for Opponents", Config.instance().getSettingData().enableGeminiAi, new ChangeListener() {
             @Override
             public void changed(ChangeEvent event, Actor actor) {
@@ -313,6 +314,59 @@ public class SettingsScene extends UIScene {
         });
         addLabel("Gemini Model");
         settingGroup.add(geminiModelBox).align(Align.right).pad(2);
+        settingGroup.row();
+
+        addSettingField("Use Vertex AI Backend", Config.instance().getSettingData().useVertexAi, new ChangeListener() {
+            @Override
+            public void changed(ChangeEvent event, Actor actor) {
+                boolean enabled = ((CheckBox) actor).isChecked();
+                Config.instance().getSettingData().useVertexAi = enabled;
+                System.setProperty("forge.gemini.useVertex", String.valueOf(enabled));
+                Config.instance().saveSettings();
+            }
+        });
+        String[] vertexLocations = {
+            "us-central1", "us-east1", "us-west1",
+            "europe-west1", "europe-west4",
+            "asia-east1", "asia-northeast1"
+        };
+        String savedVertexLocation = Config.instance().getSettingData().vertexLocation;
+        if (savedVertexLocation == null || savedVertexLocation.isEmpty()) savedVertexLocation = vertexLocations[0];
+        System.setProperty("forge.gemini.vertexLocation", savedVertexLocation);
+        SelectBox<String> vertexLocationBox = Controls.newComboBox(vertexLocations, savedVertexLocation, o -> {
+            String loc = (String) o;
+            if (loc == null || loc.isEmpty()) loc = vertexLocations[0];
+            Config.instance().getSettingData().vertexLocation = loc;
+            Config.instance().saveSettings();
+            System.setProperty("forge.gemini.vertexLocation", loc);
+            return null;
+        });
+        addLabel("Vertex Location");
+        settingGroup.add(vertexLocationBox).align(Align.right).pad(2);
+        settingGroup.row();
+        // Vertex Project ID (text field)
+        {
+            com.badlogic.gdx.scenes.scene2d.ui.TextField projField = Controls.newTextField("");
+            String savedProject = Config.instance().getSettingData().vertexProject;
+            if (savedProject == null) savedProject = "";
+            if (savedProject.isEmpty()) savedProject = System.getenv("GOOGLE_CLOUD_PROJECT") != null ? System.getenv("GOOGLE_CLOUD_PROJECT") : "";
+            projField.setText(savedProject);
+            System.setProperty("forge.gemini.vertexProject", savedProject);
+            projField.addListener(new ChangeListener() {
+                @Override
+                public void changed(ChangeEvent event, Actor actor) {
+                    String proj = ((com.badlogic.gdx.scenes.scene2d.ui.TextField) actor).getText();
+                    Config.instance().getSettingData().vertexProject = proj;
+                    System.setProperty("forge.gemini.vertexProject", proj);
+                    Config.instance().saveSettings();
+                }
+            });
+            addLabel("Vertex Project ID");
+            settingGroup.add(projField).align(Align.right).pad(2);
+            settingGroup.row();
+        }
+        System.setProperty("forge.gemini.useVertex", String.valueOf(Config.instance().getSettingData().useVertexAi));
+        // --- end Gemini AI settings ---
         CheckBox cbAnte = addCheckBox(Forge.getLocalizer().getMessage("cbAnte"), ForgePreferences.FPref.UI_ANTE);
         CheckBox cbAnteMatchRarity = addCheckBox(Forge.getLocalizer().getMessage("cbAnteMatchRarity"), ForgePreferences.FPref.UI_ANTE_MATCH_RARITY);
         CheckBox cbAnteIncludeBasicLands = addCheckBox(Forge.getLocalizer().getMessage("cbAnteIncludeBasicLands"), ForgePreferences.FPref.UI_ANTE_INCLUDE_BASIC_LANDS);

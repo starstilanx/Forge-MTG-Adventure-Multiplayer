@@ -489,6 +489,16 @@ public class DuelScene extends ForgeScene {
                 if (geminiModel != null && !geminiModel.isEmpty()) {
                     System.setProperty("forge.gemini.model", geminiModel);
                 }
+                boolean useVertex = Config.instance().getSettingData().useVertexAi;
+                System.setProperty("forge.gemini.useVertex", String.valueOf(useVertex));
+                if (useVertex) {
+                    String proj = Config.instance().getSettingData().vertexProject;
+                    if (proj != null && !proj.isEmpty())
+                        System.setProperty("forge.gemini.vertexProject", proj);
+                    String loc = Config.instance().getSettingData().vertexLocation;
+                    if (loc != null && !loc.isEmpty())
+                        System.setProperty("forge.gemini.vertexLocation", loc);
+                }
                 aiProfile = "Gemini";
             } else {
                 aiProfile = selectAI(currentEnemy.ai);

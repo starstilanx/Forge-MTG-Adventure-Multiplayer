@@ -31,4 +31,7 @@ public class SettingData {
     public boolean preferEraMatchedTokenArt;
     public boolean enableGeminiAi;
     public String geminiModel;
+    public boolean useVertexAi;
+    public String vertexProject;
+    public String vertexLocation;
 }
